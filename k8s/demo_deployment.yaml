@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloud-service-app
+  namespace: default
+  labels:
+    app: cloud-service-app
+    managed-by: rl-autoscaler
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: cloud-service-app
+  template:
+    metadata:
+      labels:
+        app: cloud-service-app
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "80"
+        prometheus.io/path: "/"
+    spec:
+      containers:
+      - name: workload-worker
+        image: nginx:alpine
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cloud-service-svc
+  namespace: default
+spec:
+  type: LoadBalancer
+  selector:
+    app: cloud-service-app
+  ports:
+  - port: 8080
+    targetPort: 80

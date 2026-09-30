@@ -1,0 +1,79 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# K8s RL Autoscaling — Full Project  |  Central Configuration
+# Edit values here; all scripts read from this file.
+# ─────────────────────────────────────────────────────────────────────────────
+
+data:
+  source: "synthetic"          # "synthetic" | "csv"
+  csv_path: null               # path to real trace CSV (used when source="csv")
+  n_days: 14                   # days of synthetic trace to generate
+  freq: "1min"                 # resampling frequency (pandas offset alias)
+  seed: 42
+
+preprocessing:
+  window_size: 60              # look-back window (timesteps)
+  horizon: 15                  # forecast horizon (timesteps)
+  train_frac: 0.8
+  val_frac: 0.1
+  # test_frac implied as remainder
+
+model:
+  hidden_size: 64
+  num_layers: 2
+  dropout: 0.3                 # kept active at inference for MC Dropout
+  horizon: 15                  # must match preprocessing.horizon
+
+training:
+  epochs: 50
+  batch_size: 256
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  early_stopping_patience: 7
+  checkpoint_dir: "checkpoints"
+
+inference:
+  n_mc_samples: 50             # stochastic forward passes per prediction
+  ci_lower_pct: 5              # lower percentile for confidence band
+  ci_upper_pct: 95             # upper percentile for confidence band
+
+evaluation:
+  output_dir: "outputs"
+
+dashboard:
+  replay_speed_default: 1      # seconds between ticks (slider default)
+  mc_samples_default: 30       # MC samples used in live dashboard
+
+rl_env:
+  min_replicas: 1              # minimum pod count allowed
+  max_replicas: 10             # maximum pod count allowed
+  initial_replicas: 3          # replicas at episode start
+  slo_threshold: 0.70          # cpu-per-pod ≤ this → SLO met
+  scale_lag_steps: 2           # steps before a scaling action takes effect
+  reward_slo_met: 1.0          # reward for meeting SLO each step
+  reward_slo_violated: -2.0    # penalty for violating SLO each step
+  reward_cost_per_replica: -0.05  # per-replica cost penalty (over-provisioning)
+  reward_stability_penalty: -0.3  # one-off penalty when replicas actually change
+
+ppo:
+  rollout_steps: 512           # env steps per rollout before an update
+  n_epochs: 4                  # PPO gradient update epochs per rollout
+  mini_batch_size: 64          # mini-batch size for each gradient step
+  gamma: 0.99                  # discount factor
+  gae_lambda: 0.95             # GAE λ (bias-variance trade-off)
+  clip_eps: 0.2                # PPO surrogate clip epsilon
+  value_loss_coef: 0.5         # weight of the value function loss
+  entropy_coef: 0.01           # weight of the entropy bonus
+  max_grad_norm: 0.5           # gradient clipping max norm
+  learning_rate: 0.0003        # AdamW learning rate
+  total_timesteps: 200000      # total environment steps to train
+  log_interval: 10             # print a log line every N rollouts
+  checkpoint_dir: "checkpoints"
+
+api:
+  host: "127.0.0.1"            # FastAPI server host
+  port: 8000                   # FastAPI server port
+
+explainability:
+  n_bg_samples: 30             # KernelSHAP background samples
+  n_explain_samples: 60        # samples to explain
+  output_dir: "outputs"        # where to save shap_*.png
