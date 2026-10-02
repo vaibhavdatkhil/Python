@@ -1,21 +1,27 @@
 """
 rl_agent/evaluate_rl.py
 ────────────────────────
-Phase 7: Evaluate the trained PPO agent and compare against a random baseline.
+Phase 7: Evaluate the trained PPO agent and compare against baselines.
 
 Metrics
 ───────
-  • Episode reward (PPO vs random)
+  • Episode reward (PPO vs random vs HPA)
   • SLO compliance %  (cpu_per_pod ≤ threshold each step)
   • Average replica count (proxy for infrastructure cost)
   • Reward curve over training (from checkpoint history)
+
+Baselines
+─────────
+  • Random: uniformly random actions (historical baseline)
+  • HPA: reactive Horizontal Pod Autoscaler using standard K8s formula
+    (desired_replicas = ceil(current * current_util / target_util))
 
 Outputs
 ───────
   outputs/rl_evaluation.png  — 4-panel figure:
     Panel 1: Training reward curve (episode rewards + rolling mean)
-    Panel 2: Replica trace — PPO vs random over one episode
-    Panel 3: CPU-per-pod trace — PPO vs random (SLO threshold line)
+    Panel 2: Replica trace — PPO vs random vs HPA over one episode
+    Panel 3: CPU-per-pod trace — PPO vs random vs HPA (SLO threshold line)
     Panel 4: Action distribution — PPO vs random (bar chart)
 
 Usage
@@ -94,6 +100,96 @@ def run_episode(env, policy=None, seed: int = 42) -> dict:
     }
 
 
+# ── HPA Baseline Policy ───────────────────────────────────────────────────────
+
+def run_episode_hpa(env, cfg: dict, seed: int = 42) -> dict:
+    """Run one full episode with a reactive HPA policy.
+
+    Uses the standard Kubernetes HPA formula (reused from dashboard/app.py):
+      desired_replicas = ceil(current_replicas * (current_cpu / target_cpu))
+    with actuation lag matching the env's scale_lag_steps.
+
+    Returns
+    -------
+    dict with keys:
+      rewards, replicas, cpu_per_pod, actions, slo_met
+      total_reward, slo_pct, avg_replicas
+    """
+    obs_np, _ = env.reset(seed=seed)
+
+    rewards    = []
+    replicas   = []
+    cpu_per_pod_list = []
+    actions    = []
+    slo_met    = []
+
+    # HPA state
+    current_replicas = cfg["rl_env"]["initial_replicas"]
+    min_r = cfg["rl_env"]["min_replicas"]
+    max_r = cfg["rl_env"]["max_replicas"]
+    target_slo = cfg["rl_env"]["slo_threshold"]
+    lag = cfg["rl_env"]["scale_lag_steps"]
+
+    # Action history for applying lag
+    action_queue = []
+
+    done = False
+    step = 0
+    while not done:
+        # HPA decision: compute desired replicas based on observed CPU
+        # Extract cpu_per_pod from info after taking an action
+        # For the first step, use a neutral action (action=2 → delta=0)
+        if step == 0:
+            action = 2  # hold
+        else:
+            # Use lagged observation for HPA (mimics metrics scraping delay)
+            lagged_idx = max(0, step - lag)
+            lagged_cpu = cpu_per_pod_list[lagged_idx] if lagged_idx < len(cpu_per_pod_list) else target_slo
+            lagged_replicas = replicas[lagged_idx] if lagged_idx < len(replicas) else current_replicas
+
+            # Standard HPA formula
+            desired = int(np.ceil(lagged_replicas * (lagged_cpu / max(target_slo, 1e-3))))
+            desired = int(np.clip(desired, min_r, max_r))
+
+            # Convert desired replicas to action (delta)
+            delta = desired - current_replicas
+            # Map delta to discrete action space: {-2, -1, 0, +1, +2} → {0, 1, 2, 3, 4}
+            if delta <= -2:
+                action = 0
+            elif delta == -1:
+                action = 1
+            elif delta == 0:
+                action = 2
+            elif delta == 1:
+                action = 3
+            else:  # delta >= 2
+                action = 4
+
+        obs_np, reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+
+        rewards.append(float(reward))
+        replicas.append(int(info["replicas"]))
+        cpu_per_pod_list.append(float(info["cpu_per_pod"]))
+        actions.append(int(action))
+        slo_met.append(bool(info["slo_met"]))
+
+        current_replicas = int(info["replicas"])
+        step += 1
+
+    n = max(len(rewards), 1)
+    return {
+        "rewards":      rewards,
+        "replicas":     replicas,
+        "cpu_per_pod":  cpu_per_pod_list,
+        "actions":      actions,
+        "slo_met":      slo_met,
+        "total_reward": sum(rewards),
+        "slo_pct":      sum(slo_met) / n * 100,
+        "avg_replicas": np.mean(replicas),
+    }
+
+
 # ── Plotting ──────────────────────────────────────────────────────────────────
 
 def _rolling_mean(x: list, w: int = 20) -> np.ndarray:
@@ -109,6 +205,7 @@ def make_evaluation_plot(
     training_history: Optional[dict],
     ppo_result:       dict,
     random_result:    dict,
+    hpa_result:       dict,
     slo_threshold:    float,
     output_path:      Path,
 ) -> None:
@@ -123,6 +220,7 @@ def make_evaluation_plot(
     GRID_C   = "#30363d"
     PPO_C    = "#58a6ff"
     RAND_C   = "#f78166"
+    HPA_C    = "#a78bfa"     # purple for HPA
     SLO_C    = "#3fb950"
     MEAN_C   = "#ffa657"
 
@@ -154,15 +252,17 @@ def make_evaluation_plot(
 
     # ── Panel 2: Replica Trace ────────────────────────────────────────────────
     ax2 = axes[0, 1]
-    _style_ax(ax2, "[2] Replica Trace -- PPO vs Random")
+    _style_ax(ax2, "[2] Replica Trace -- PPO vs HPA vs Random")
     steps = np.arange(len(ppo_result["replicas"]))
     # Downsample if very long
     ds = max(1, len(steps) // 2000)
     ax2.plot(steps[::ds], np.array(ppo_result["replicas"])[::ds],
-             color=PPO_C,  linewidth=1.2, label=f"PPO (avg={ppo_result['avg_replicas']:.1f})")
+             color=PPO_C,  linewidth=1.4, label=f"PPO (avg={ppo_result['avg_replicas']:.1f})")
+    ax2.plot(steps[::ds], np.array(hpa_result["replicas"])[::ds],
+             color=HPA_C,  linewidth=1.2, alpha=0.85, label=f"HPA (avg={hpa_result['avg_replicas']:.1f})")
     steps_r = np.arange(len(random_result["replicas"]))
     ax2.plot(steps_r[::ds], np.array(random_result["replicas"])[::ds],
-             color=RAND_C, linewidth=1.2, alpha=0.7, label=f"Random (avg={random_result['avg_replicas']:.1f})")
+             color=RAND_C, linewidth=1.0, alpha=0.6, label=f"Random (avg={random_result['avg_replicas']:.1f})")
     ax2.set_xlabel("Step")
     ax2.set_ylabel("Replicas")
     ax2.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
@@ -170,28 +270,33 @@ def make_evaluation_plot(
 
     # ── Panel 3: CPU-per-Pod Trace ────────────────────────────────────────────
     ax3 = axes[1, 0]
-    _style_ax(ax3, "[3] CPU-per-Pod -- PPO vs Random")
+    _style_ax(ax3, "[3] CPU-per-Pod -- PPO vs HPA vs Random")
     cpp_ppo  = np.array(ppo_result["cpu_per_pod"])
+    cpp_hpa  = np.array(hpa_result["cpu_per_pod"])
     cpp_rand = np.array(random_result["cpu_per_pod"])
     steps_p  = np.arange(len(cpp_ppo))
+    steps_h  = np.arange(len(cpp_hpa))
     steps_r2 = np.arange(len(cpp_rand))
-    ds2 = max(1, max(len(steps_p), len(steps_r2)) // 2000)
+    ds2 = max(1, max(len(steps_p), len(steps_h), len(steps_r2)) // 2000)
     ax3.plot(steps_p[::ds2], cpp_ppo[::ds2],
-             color=PPO_C,  linewidth=1.0,
+             color=PPO_C,  linewidth=1.2,
              label=f"PPO  SLO={ppo_result['slo_pct']:.1f}%")
+    ax3.plot(steps_h[::ds2], cpp_hpa[::ds2],
+             color=HPA_C,  linewidth=1.0, alpha=0.85,
+             label=f"HPA  SLO={hpa_result['slo_pct']:.1f}%")
     ax3.plot(steps_r2[::ds2], cpp_rand[::ds2],
-             color=RAND_C, linewidth=1.0, alpha=0.7,
+             color=RAND_C, linewidth=0.8, alpha=0.6,
              label=f"Random SLO={random_result['slo_pct']:.1f}%")
     ax3.axhline(slo_threshold, color=SLO_C, linestyle="--", linewidth=1.5,
                 label=f"SLO threshold ({slo_threshold})")
     ax3.set_xlabel("Step")
     ax3.set_ylabel("CPU / Pod")
-    ax3.set_ylim(0, max(1.2, cpp_ppo.max() * 1.1, cpp_rand.max() * 1.1))
+    ax3.set_ylim(0, max(1.2, cpp_ppo.max() * 1.1, cpp_hpa.max() * 1.1, cpp_rand.max() * 1.1))
     ax3.legend(facecolor=PANEL_BG, edgecolor=GRID_C, labelcolor="white", fontsize=9)
 
     # ── Panel 4: Action Distribution ──────────────────────────────────────────
     ax4 = axes[1, 1]
-    _style_ax(ax4, "[4] Action Distribution")
+    _style_ax(ax4, "[4] Action Distribution -- PPO vs Random")
     action_labels = ["-2", "-1", " 0", "+1", "+2"]
     x_pos         = np.arange(5)
     width         = 0.35
@@ -210,13 +315,14 @@ def make_evaluation_plot(
     ax4.legend(facecolor=PANEL_BG, edgecolor=GRID_C, labelcolor="white", fontsize=9)
 
     # ── overall title ─────────────────────────────────────────────────────────
-    ppo_vs_rand = ppo_result["total_reward"] - random_result["total_reward"]
-    sign = "+" if ppo_vs_rand >= 0 else ""
+    ppo_vs_hpa = ppo_result["total_reward"] - hpa_result["total_reward"]
+    sign = "+" if ppo_vs_hpa >= 0 else ""
     fig.suptitle(
         f"PPO Agent Evaluation   |   "
-        f"PPO reward: {ppo_result['total_reward']:+.0f}   "
+        f"PPO: {ppo_result['total_reward']:+.0f}   "
+        f"HPA: {hpa_result['total_reward']:+.0f}   "
         f"Random: {random_result['total_reward']:+.0f}   "
-        f"Diff={sign}{ppo_vs_rand:.0f}",
+        f"PPO vs HPA={sign}{ppo_vs_hpa:.0f}",
         color="white", fontsize=14, fontweight="bold", y=1.01,
     )
 
@@ -288,7 +394,7 @@ def main() -> None:
         lstm_model, scaler, _ = load_lstm(lstm_ckpt, device=device)
         print(f"  LSTM model : {lstm_ckpt.name}", flush=True)
 
-    # ── load trace + build env ────────────────────────────────────────────────
+    # ── load trace + build envs ───────────────────────────────────────────────
     from data.loader import load_trace
     from rl_env.k8s_env import K8sAutoscalingEnv
 
@@ -298,6 +404,10 @@ def main() -> None:
         trace_df=df, device=device,
     )
     env_rand = K8sAutoscalingEnv(
+        cfg=cfg, model=None, scaler=None,
+        trace_df=df, device=device,
+    )
+    env_hpa = K8sAutoscalingEnv(
         cfg=cfg, model=None, scaler=None,
         trace_df=df, device=device,
     )
@@ -312,6 +422,9 @@ def main() -> None:
     print("\n  Running PPO episode ...", flush=True)
     ppo_result = run_episode(env_ppo, policy=policy, seed=42)
 
+    print("  Running HPA-baseline episode ...", flush=True)
+    hpa_result = run_episode_hpa(env_hpa, cfg=cfg, seed=42)
+
     print("  Running random-baseline episode ...", flush=True)
     random_result = run_episode(env_rand, policy=None, seed=42)
 
@@ -319,20 +432,26 @@ def main() -> None:
 
     # ── print comparison table ────────────────────────────────────────────────
     print("", flush=True)
-    print(f"  {'Metric':<28} {'PPO':>12} {'Random':>12}", flush=True)
-    print(f"  {'-'*52}", flush=True)
-    print(f"  {'Total reward':<28} {ppo_result['total_reward']:>+12.1f} {random_result['total_reward']:>+12.1f}", flush=True)
-    print(f"  {'SLO compliance (%)':<28} {ppo_result['slo_pct']:>11.1f}% {random_result['slo_pct']:>11.1f}%", flush=True)
-    print(f"  {'Avg replicas':<28} {ppo_result['avg_replicas']:>12.2f} {random_result['avg_replicas']:>12.2f}", flush=True)
-    print(f"  {'Episode steps':<28} {len(ppo_result['rewards']):>12,} {len(random_result['rewards']):>12,}", flush=True)
+    print(f"  {'Metric':<28} {'PPO':>12} {'HPA':>12} {'Random':>12}", flush=True)
+    print(f"  {'-'*68}", flush=True)
+    print(f"  {'Total reward':<28} {ppo_result['total_reward']:>+12.1f} {hpa_result['total_reward']:>+12.1f} {random_result['total_reward']:>+12.1f}", flush=True)
+    print(f"  {'SLO compliance (%)':<28} {ppo_result['slo_pct']:>11.1f}% {hpa_result['slo_pct']:>11.1f}% {random_result['slo_pct']:>11.1f}%", flush=True)
+    print(f"  {'Avg replicas':<28} {ppo_result['avg_replicas']:>12.2f} {hpa_result['avg_replicas']:>12.2f} {random_result['avg_replicas']:>12.2f}", flush=True)
+    print(f"  {'Episode steps':<28} {len(ppo_result['rewards']):>12,} {len(hpa_result['rewards']):>12,} {len(random_result['rewards']):>12,}", flush=True)
 
-    delta = ppo_result["slo_pct"] - random_result["slo_pct"]
-    sign  = "+" if delta >= 0 else ""
-    print(f"\n  SLO improvement vs random  : {sign}{delta:.1f}%", flush=True)
+    delta_hpa = ppo_result["slo_pct"] - hpa_result["slo_pct"]
+    sign_hpa  = "+" if delta_hpa >= 0 else ""
+    delta_rand = ppo_result["slo_pct"] - random_result["slo_pct"]
+    sign_rand  = "+" if delta_rand >= 0 else ""
+    print(f"\n  SLO improvement vs HPA     : {sign_hpa}{delta_hpa:.1f}%", flush=True)
+    print(f"  SLO improvement vs random  : {sign_rand}{delta_rand:.1f}%", flush=True)
 
-    reward_delta = ppo_result["total_reward"] - random_result["total_reward"]
-    sign2 = "+" if reward_delta >= 0 else ""
-    print(f"  Reward improvement vs random: {sign2}{reward_delta:.1f}", flush=True)
+    reward_delta_hpa = ppo_result["total_reward"] - hpa_result["total_reward"]
+    sign2_hpa = "+" if reward_delta_hpa >= 0 else ""
+    reward_delta_rand = ppo_result["total_reward"] - random_result["total_reward"]
+    sign2_rand = "+" if reward_delta_rand >= 0 else ""
+    print(f"  Reward improvement vs HPA   : {sign2_hpa}{reward_delta_hpa:.1f}", flush=True)
+    print(f"  Reward improvement vs random: {sign2_rand}{reward_delta_rand:.1f}", flush=True)
 
     # ── generate plot ─────────────────────────────────────────────────────────
     output_dir  = project_root / cfg["evaluation"]["output_dir"]
@@ -342,6 +461,7 @@ def main() -> None:
         training_history=training_history,
         ppo_result=ppo_result,
         random_result=random_result,
+        hpa_result=hpa_result,
         slo_threshold=slo_threshold,
         output_path=output_path,
     )

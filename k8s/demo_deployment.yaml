@@ -1,3 +1,14 @@
+# ── Demo Microservice Deployment ─────────────────────────────────────────────
+# Image: demo-app:1  (built locally with `docker build -t demo-app:1 app/`)
+#
+# Build & deploy (Minikube):
+#   eval $(minikube docker-env)          # point Docker CLI at Minikube's daemon
+#   docker build -t demo-app:1 app/      # build inside Minikube
+#   kubectl apply -f k8s/demo_deployment.yaml
+#
+# Resource constraints are intentionally small for laptop demo (8 GB RAM).
+# Max replicas capped at 5 via HPA or manual scale to keep memory pressure low.
+# ─────────────────────────────────────────────────────────────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -16,32 +27,75 @@ spec:
       labels:
         app: cloud-service-app
       annotations:
+        # Tell Prometheus (or kube-prometheus-stack) to scrape this pod
         prometheus.io/scrape: "true"
-        prometheus.io/port: "80"
-        prometheus.io/path: "/"
+        prometheus.io/port:   "8000"
+        prometheus.io/path:   "/metrics"
     spec:
       containers:
-      - name: workload-worker
-        image: nginx:alpine
+      - name: demo-app
+        image: demo-app:1
+        # Never pull from registry — image must be pre-built inside Minikube
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8000
+          name: http
         resources:
           requests:
-            cpu: "200m"
-            memory: "256Mi"
+            cpu:    "100m"
+            memory: "128Mi"
           limits:
-            cpu: "500m"
-            memory: "512Mi"
-        ports:
-        - containerPort: 80
+            cpu:    "300m"
+            memory: "256Mi"
+        # Basic liveness + readiness probes
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 3
+          periodSeconds: 5
 ---
+# ── Service (ClusterIP for internal + NodePort for external access) ───────────
 apiVersion: v1
 kind: Service
 metadata:
   name: cloud-service-svc
   namespace: default
 spec:
-  type: LoadBalancer
+  type: NodePort
   selector:
     app: cloud-service-app
   ports:
-  - port: 8080
-    targetPort: 80
+  - port: 8000
+    targetPort: 8000
+    nodePort: 30080
+    name: http
+---
+# ── HPA (optional, capped at 5 replicas for laptop demo) ─────────────────────
+# Uncomment after deploying kube-prometheus-stack + metrics-server.
+#
+# apiVersion: autoscaling/v2
+# kind: HorizontalPodAutoscaler
+# metadata:
+#   name: cloud-service-hpa
+#   namespace: default
+# spec:
+#   scaleTargetRef:
+#     apiVersion: apps/v1
+#     kind: Deployment
+#     name: cloud-service-app
+#   minReplicas: 1
+#   maxReplicas: 5           # laptop-safe cap
+#   metrics:
+#   - type: Resource
+#     resource:
+#       name: cpu
+#       target:
+#         type: Utilization
+#         averageUtilization: 70

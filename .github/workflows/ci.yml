@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Smoke test — instantiate Gymnasium env
+        run: |
+          python -c "
+          from rl_env import K8sAutoscalingEnv
+          import yaml
+          with open('config.yaml') as f:
+              cfg = yaml.safe_load(f)
+          env = K8sAutoscalingEnv(cfg, model=None, scaler=None, trace_df=None, device='cpu')
+          print('✓ Environment instantiated successfully')
+          "
+      
+      - name: Smoke test — run env.step() a few times
+        run: |
+          python -c "
+          from rl_env import K8sAutoscalingEnv
+          from data.loader import load_trace
+          import yaml
+          with open('config.yaml') as f:
+              cfg = yaml.safe_load(f)
+          df = load_trace(cfg=cfg)
+          env = K8sAutoscalingEnv(cfg, model=None, scaler=None, trace_df=df, device='cpu')
+          obs, _ = env.reset(seed=42)
+          for i in range(10):
+              action = env.action_space.sample()
+              obs, reward, terminated, truncated, info = env.step(action)
+              if terminated or truncated:
+                  obs, _ = env.reset()
+          env.close()
+          print('✓ Environment smoke test passed (10 steps)')
+          "
+      
+      - name: Smoke test — verify Gymnasium env with check_env
+        run: |
+          python -c "
+          from rl_env import K8sAutoscalingEnv
+          from data.loader import load_trace
+          from gymnasium.utils.env_checker import check_env
+          import yaml
+          with open('config.yaml') as f:
+              cfg = yaml.safe_load(f)
+          df = load_trace(cfg=cfg)
+          env = K8sAutoscalingEnv(cfg, model=None, scaler=None, trace_df=df, device='cpu')
+          check_env(env.unwrapped, skip_render_check=True)
+          print('✓ Gymnasium check_env passed')
+          "

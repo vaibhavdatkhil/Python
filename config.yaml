@@ -68,6 +68,8 @@ ppo:
   total_timesteps: 200000      # total environment steps to train
   log_interval: 10             # print a log line every N rollouts
   checkpoint_dir: "checkpoints"
+  log_transitions: false       # if true, logs (s,a,r,s',done) to data/sim_transitions.csv
+  mlflow_tracking: false       # if true, logs training metrics to MLflow
 
 api:
   host: "127.0.0.1"            # FastAPI server host

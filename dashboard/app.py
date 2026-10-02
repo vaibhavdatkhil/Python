@@ -355,43 +355,110 @@ def render_scaling_decisions_tab(cfg: dict, df_full: pd.DataFrame, rl_ep: dict |
 
 
 def render_training_tab(ppo_history: dict | None = None):
-    """Render the Training progress tab (mockup convergence + real logs if present)."""
+    """Render the Training progress tab (real training_log.csv + checkpoint history)."""
     st.markdown("### 🎓 RL Policy Training & Convergence")
     
-    st.info(
-        "ℹ️ **Coming in Phase 2**: Live online training loop telemetry, multi-agent exploration metrics, "
-        "and continuous policy fine-tuning dashboard."
-    )
+    training_log_path = PROJECT_ROOT / "checkpoints" / "training_log.csv"
+    
+    if training_log_path.exists():
+        st.markdown("#### Real-Time Training Progress (from training_log.csv)")
+        try:
+            df_log = pd.read_csv(training_log_path)
+            
+            if len(df_log) == 0:
+                st.warning("training_log.csv exists but is empty. Run `python -m rl_agent.train_rl` first.")
+            else:
+                # Plot reward curve
+                fig_train = go.Figure()
+                fig_train.add_trace(go.Scatter(
+                    x=df_log["rollout"], y=df_log["mean_reward"],
+                    mode="lines", name="Mean Reward (rolling-10 episodes)",
+                    line=dict(color="#a78bfa", width=2.5),
+                ))
+                fig_train.update_layout(**_dark_layout("PPO Training Reward Convergence", 320))
+                fig_train.update_layout(
+                    xaxis=dict(title="Rollout"),
+                    yaxis=dict(title="Mean Episode Reward (last 10 eps)"),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                )
+                st.plotly_chart(fig_train, use_container_width=True, key="fig_train_real")
+                st.caption(
+                    f"*Logged {len(df_log)} rollouts from live PPO training. "
+                    "Mean reward computed over last 10 completed episodes.*"
+                )
+                
+                # Summary metrics table
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    final_reward = df_log["mean_reward"].iloc[-1]
+                    st.markdown(kpi("FINAL MEAN REWARD", f"{final_reward:+.1f}", "last 10 episodes"), unsafe_allow_html=True)
+                with col2:
+                    final_slo = df_log["slo_pct"].iloc[-1]
+                    st.markdown(kpi("FINAL SLO %", f"{final_slo:.1f}%", "last 10 episodes"), unsafe_allow_html=True)
+                with col3:
+                    final_reps = df_log["avg_replicas"].iloc[-1]
+                    st.markdown(kpi("AVG REPLICAS", f"{final_reps:.2f}", "last 10 episodes"), unsafe_allow_html=True)
+                
+                # Optional: loss curves
+                with st.expander("📉 Loss Curves (Policy & Value)"):
+                    fig_loss = go.Figure()
+                    fig_loss.add_trace(go.Scatter(
+                        x=df_log["rollout"], y=df_log["policy_loss"],
+                        mode="lines", name="Policy Loss",
+                        line=dict(color="#f87171", width=1.5),
+                    ))
+                    fig_loss.add_trace(go.Scatter(
+                        x=df_log["rollout"], y=df_log["value_loss"],
+                        mode="lines", name="Value Loss",
+                        line=dict(color="#38bdf8", width=1.5),
+                    ))
+                    fig_loss.update_layout(**_dark_layout("Training Loss Curves", 260))
+                    fig_loss.update_layout(
+                        xaxis=dict(title="Rollout"),
+                        yaxis=dict(title="Loss"),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    )
+                    st.plotly_chart(fig_loss, use_container_width=True, key="fig_loss_curves")
+                    
+        except Exception as e:
+            st.error(f"Failed to read training_log.csv: {e}")
+    else:
+        st.warning(
+            f"**training_log.csv not found** at `{training_log_path.relative_to(PROJECT_ROOT)}`.\n\n"
+            "Run PPO training to generate the log:\n"
+            "```bash\n"
+            "python -m rl_agent.train_rl\n"
+            "```"
+        )
+        
+        st.markdown("#### Training Progress Preview (Mockup)")
+        st.caption("*This is a placeholder convergence curve showing typical PPO behavior. Real data will appear above after training.*")
+        
+        # Synthetic mock convergence curve (kept as fallback/demo)
+        episodes = np.arange(1, 201)
+        np.random.seed(42)
+        noise = np.random.normal(0, 35 * np.exp(-episodes / 60), size=len(episodes))
+        mock_rewards = 520.0 - 850.0 * np.exp(-episodes / 35.0) + noise
+        rolling_mock = pd.Series(mock_rewards).rolling(15, min_periods=1).mean().tolist()
 
-    st.markdown("#### Reward-Curve Convergence Mockup (DQN / PPO)")
-
-    # Synthetic mock convergence curve
-    episodes = np.arange(1, 201)
-    np.random.seed(42)
-    noise = np.random.normal(0, 35 * np.exp(-episodes / 60), size=len(episodes))
-    mock_rewards = 520.0 - 850.0 * np.exp(-episodes / 35.0) + noise
-    rolling_mock = pd.Series(mock_rewards).rolling(15, min_periods=1).mean().tolist()
-
-    fig_train = go.Figure()
-    fig_train.add_trace(go.Scatter(
-        x=episodes, y=mock_rewards,
-        mode="lines", name="Raw Episode Reward",
-        line=dict(color="#64748b", width=1), opacity=0.45,
-    ))
-    fig_train.add_trace(go.Scatter(
-        x=episodes, y=rolling_mock,
-        mode="lines", name="Smoothed Convergence (PPO/DQN)",
-        line=dict(color="#a78bfa", width=2.5),
-    ))
-
-    fig_train.update_layout(**_dark_layout("RL Training Reward-Curve Convergence (Mockup)", 320))
-    fig_train.update_layout(
-        xaxis=dict(title="Training Episode"),
-        yaxis=dict(title="Cumulative Reward"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    )
-    st.plotly_chart(fig_train, use_container_width=True, key="fig_train_mockup")
-    st.caption("*Gray line = raw noisy episode reward, purple line = 15-episode smoothed moving average showing asymptotic convergence.*")
+        fig_mock = go.Figure()
+        fig_mock.add_trace(go.Scatter(
+            x=episodes, y=mock_rewards,
+            mode="lines", name="Raw Episode Reward",
+            line=dict(color="#64748b", width=1), opacity=0.45,
+        ))
+        fig_mock.add_trace(go.Scatter(
+            x=episodes, y=rolling_mock,
+            mode="lines", name="Smoothed Convergence",
+            line=dict(color="#a78bfa", width=2.5),
+        ))
+        fig_mock.update_layout(**_dark_layout("Mockup: PPO Reward Convergence", 300))
+        fig_mock.update_layout(
+            xaxis=dict(title="Episode"),
+            yaxis=dict(title="Cumulative Reward"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_mock, use_container_width=True, key="fig_train_mockup")
 
     # If actual PPO history is in checkpoint, display real checkpoint training telemetry below
     if ppo_history and ppo_history.get("episode_rewards"):
@@ -419,7 +486,7 @@ def render_training_tab(ppo_history: dict | None = None):
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
         st.plotly_chart(fig_real, use_container_width=True, key="fig_real_train_hist")
-        st.caption("*Blue line = raw checkpoint training episode reward, orange line = 20-episode rolling mean.*")
+        st.caption("*Blue line = raw checkpoint training episode reward, orange line = rolling mean.*")
 
 
 # ── cached loaders ────────────────────────────────────────────────────────────

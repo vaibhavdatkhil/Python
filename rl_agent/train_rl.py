@@ -94,15 +94,22 @@ def main() -> None:
 
     # ── env factory ───────────────────────────────────────────────────────────
     from rl_env.k8s_env import K8sAutoscalingEnv
+    from rl_env.wrappers import TransitionLogger
 
     def env_factory():
-        return K8sAutoscalingEnv(
+        env = K8sAutoscalingEnv(
             cfg=cfg,
             model=lstm_model,
             scaler=scaler,
             trace_df=df,
             device=device,
         )
+        # Optionally wrap with TransitionLogger to persist (s,a,r,s',done) data
+        if cfg["ppo"].get("log_transitions", False):
+            transitions_path = project_root / "data" / "sim_transitions.csv"
+            env = TransitionLogger(env, output_path=transitions_path)
+            print(f"  Transition logging enabled → {transitions_path}")
+        return env
 
     # ── run PPO ───────────────────────────────────────────────────────────────
     from rl_agent.ppo import train_ppo

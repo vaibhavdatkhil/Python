@@ -199,45 +199,98 @@ class LiveK8sClient(K8sClusterInterface):
             return False
 
     def get_cpu_utilization(self, deployment: str, namespace: str = "default") -> float:
-        """Fetch average CPU utilization per pod from Prometheus or kubectl top fallback."""
-        # 1. Query Prometheus metrics if accessible
-        try:
-            import urllib.request
-            import urllib.parse
-            import json
+        """Fetch average CPU utilization per pod from Prometheus or kubectl top fallback.
 
-            prom_query = f'sum(rate(container_cpu_usage_seconds_total{{pod=~"{deployment}-.*"}}[1m]))'
-            url = f"{self.prometheus_url}/api/v1/query?" + urllib.parse.urlencode({"query": prom_query})
+        Prometheus query targets the kube-prometheus-stack (Helm) metric names:
+          container_cpu_usage_seconds_total  — standard cAdvisor metric exposed by
+          the kube-prometheus-stack chart (prometheus-community/kube-prometheus-stack).
+
+        The label used is `pod` (not `kubernetes_pod_name`) which is what the Helm
+        chart's cAdvisor relabelling produces.  The `container!=""` guard excludes
+        the pause/infra container rows that would double-count CPU.
+        """
+        import urllib.request
+        import urllib.parse
+        import json as _json
+
+        # ── 1. kube-prometheus-stack (Helm chart) query ───────────────────────
+        # Uses `pod` label (relabelled by kube-prometheus-stack's cAdvisor scrape)
+        # and excludes the empty-string container (pause/infra sidecar).
+        try:
+            prom_query = (
+                f'sum(rate(container_cpu_usage_seconds_total{{'
+                f'pod=~"{deployment}-.*",container!=""}}'
+                f'[1m])) by (pod)'
+            )
+            url = (
+                f"{self.prometheus_url}/api/v1/query?"
+                + urllib.parse.urlencode({"query": prom_query})
+            )
             req = urllib.request.Request(url, headers={"User-Agent": "k8s-adapter"})
-            with urllib.request.urlopen(req, timeout=2) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                if data.get("status") == "success":
-                    results = data.get("data", {}).get("result", [])
-                    if results and len(results) > 0:
-                        total_cpu = float(results[0]["value"][1])
-                        replicas = max(self.get_replicas(deployment, namespace), 1)
-                        return min(max((total_cpu / replicas) / 0.5, 0.05), 1.0)
-        except Exception:
-            pass
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+            if data.get("status") == "success":
+                results = data.get("data", {}).get("result", [])
+                if results:
+                    # Sum CPU across all matching pods, then average per-pod
+                    total_cpu = sum(float(r["value"][1]) for r in results)
+                    n_pods    = max(len(results), 1)
+                    # Normalise: container limit is 300m (0.3 cores) from demo_deployment.yaml
+                    cpu_per_pod_normalised = (total_cpu / n_pods) / 0.3
+                    return float(min(max(cpu_per_pod_normalised, 0.05), 2.0))
+                else:
+                    logger.warning(
+                        "[k8s-live] Prometheus query returned 0 results for "
+                        f"deployment '{deployment}'. "
+                        "Ensure kube-prometheus-stack is installed and cAdvisor "
+                        "metrics are being scraped (check port-forward 9090)."
+                    )
+        except Exception as exc:
+            logger.warning(
+                f"[k8s-live] Prometheus query failed: {exc}. "
+                "Falling back to kubectl top."
+            )
 
-        # 2. Try kubectl top pods fallback
+        # ── 2. kubectl top pods fallback ──────────────────────────────────────
         try:
-            cmd = ["kubectl", "top", "pods", "-l", f"app={deployment}", "-n", namespace, "--no-headers"]
-            res = subprocess.run(cmd, capture_output=True, text=True)
+            cmd = [
+                "kubectl", "top", "pods",
+                "-l", f"app={deployment}",
+                "-n", namespace,
+                "--no-headers",
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
             if res.returncode == 0 and res.stdout.strip():
                 lines = res.stdout.strip().splitlines()
                 total_millicores = 0
+                count = 0
                 for line in lines:
                     parts = line.split()
                     if len(parts) >= 2:
                         val = parts[1].replace("m", "")
-                        total_millicores += int(val)
-                avg_milli = total_millicores / max(len(lines), 1)
-                return avg_milli / 500.0
-        except Exception:
-            pass
+                        try:
+                            total_millicores += int(val)
+                            count += 1
+                        except ValueError:
+                            pass
+                if count > 0:
+                    avg_milli = total_millicores / count
+                    # Normalise against 300m limit (from demo_deployment.yaml)
+                    return float(min(avg_milli / 300.0, 2.0))
+            logger.warning(
+                f"[k8s-live] kubectl top returned no data for '{deployment}'. "
+                "Is metrics-server running?"
+            )
+        except Exception as exc:
+            logger.warning(f"[k8s-live] kubectl top failed: {exc}.")
 
-        # 3. Graceful default when metrics server is initializing
+        # ── 3. Hard fallback — log a WARNING so silent failures are visible ───
+        logger.warning(
+            "[k8s-live] FALLBACK: both Prometheus and kubectl top unavailable. "
+            "Returning hardcoded CPU value 0.45. "
+            "Fix: install kube-prometheus-stack via Helm (see README § Helm Setup) "
+            "and ensure `kubectl top pods` works (metrics-server required)."
+        )
         return 0.45
 
 
@@ -261,6 +314,7 @@ class RLAutoscalingController:
         deployment: str = "cloud-service-app",
         namespace: str = "default",
         cooldown_steps: int = 1,
+        log_transitions_csv: Path | str | None = None,
     ):
         with open(config_path) as f:
             self.cfg = yaml.safe_load(f)
@@ -288,6 +342,25 @@ class RLAutoscalingController:
         self.min_r = self.cfg["rl_env"]["min_replicas"]
         self.max_r = self.cfg["rl_env"]["max_replicas"]
         self.slo_thr = self.cfg["rl_env"]["slo_threshold"]
+
+        # Optional CSV transition logging for live control-loop data collection
+        self._csv_writer = None
+        self._csv_fh = None
+        if log_transitions_csv:
+            import csv
+            csv_path = Path(log_transitions_csv)
+            csv_path.parent.mkdir(parents=True, exist_ok=True)
+            write_header = not csv_path.exists() or csv_path.stat().st_size == 0
+            self._csv_fh = open(csv_path, "a", newline="")
+            fieldnames = [
+                "timestamp", "step", "current_replicas", "cpu_per_pod",
+                "action", "target_replicas", "reward", "slo_met", "uncertainty",
+            ]
+            self._csv_writer = csv.DictWriter(self._csv_fh, fieldnames=fieldnames)
+            if write_header:
+                self._csv_writer.writeheader()
+                self._csv_fh.flush()
+            logger.info(f"Transition logging enabled → {csv_path}")
 
     def build_observation(
         self,
@@ -371,6 +444,34 @@ class RLAutoscalingController:
             self.cluster.scale(self.deployment, target_replicas, self.namespace)
             self.last_action_step = step_idx
 
+        # Compute a simple shaped reward matching the RL env's logic (for logging)
+        # This is approximate since we don't have next_state here, but useful for analysis.
+        reward = 0.0
+        if slo_met:
+            reward += self.cfg["rl_env"]["reward_slo_met"]
+        else:
+            reward += self.cfg["rl_env"]["reward_slo_violated"]
+        reward += current_replicas * self.cfg["rl_env"]["reward_cost_per_replica"]
+        if delta_r != 0:
+            reward += self.cfg["rl_env"]["reward_stability_penalty"]
+
+        # CSV transition logging (if enabled)
+        if self._csv_writer:
+            from datetime import datetime
+            row = {
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "step": step_idx,
+                "current_replicas": current_replicas,
+                "cpu_per_pod": round(cpu_per_pod, 4),
+                "action": action_idx,
+                "target_replicas": target_replicas,
+                "reward": round(reward, 3),
+                "slo_met": int(slo_met),
+                "uncertainty": round(uncertainty, 4),
+            }
+            self._csv_writer.writerow(row)
+            self._csv_fh.flush()
+
         return {
             "step": step_idx,
             "current_replicas": current_replicas,
@@ -427,6 +528,10 @@ def run_controller_demo(
         cluster=cluster,
         deployment=deployment,
         namespace=namespace,
+        log_transitions_csv=(
+            PROJECT_ROOT / "data" / "live_transitions.csv"
+            if mode == "live" else None
+        ),
     )
 
     logger.info(f"{'STEP':<6} {'WORKLOAD':<10} {'REPLICAS':<10} {'CPU/POD':<10} {'ACTION':<10} {'SLO':<8}")

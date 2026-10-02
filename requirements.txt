@@ -18,3 +18,9 @@ httpx>=0.27.0
 # Phase 11 — Kubernetes Integration & Load Testing
 kubernetes>=29.0.0
 locust>=2.24.0
+# Task 2 & 5 — Prometheus metrics collection
+prometheus-api-client>=0.5.3
+# Task 1 — Demo app Prometheus instrumentation
+prometheus-fastapi-instrumentator>=6.1.0
+# Task 9 — MLflow experiment tracking
+mlflow>=2.10.0

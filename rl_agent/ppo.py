@@ -283,6 +283,9 @@ def train_ppo(
     -------
     history : dict with 'episode_rewards', 'slo_pcts', 'avg_replicas'.
     """
+    import csv
+    from pathlib import Path
+    
     ppo_cfg       = cfg["ppo"]
     rollout_steps = int(ppo_cfg["rollout_steps"])
     total_ts      = int(total_timesteps_override or ppo_cfg["total_timesteps"])
@@ -293,6 +296,45 @@ def train_ppo(
     ckpt_dir      = Path(ppo_cfg["checkpoint_dir"])
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path     = ckpt_dir / "ppo_agent.pt"
+
+    # Optional MLflow tracking
+    mlflow_enabled = ppo_cfg.get("mlflow_tracking", False)
+    if mlflow_enabled:
+        try:
+            import mlflow
+            mlflow.set_experiment("k8s-rl-autoscaling")
+            mlflow.start_run()
+            mlflow.log_params({
+                "rollout_steps": rollout_steps,
+                "total_timesteps": total_ts,
+                "learning_rate": lr,
+                "gamma": gamma,
+                "gae_lambda": gae_lambda,
+                "clip_eps": float(ppo_cfg["clip_eps"]),
+                "n_epochs": int(ppo_cfg["n_epochs"]),
+                "mini_batch_size": int(ppo_cfg["mini_batch_size"]),
+            })
+            print(f"  MLflow tracking enabled (experiment: k8s-rl-autoscaling)")
+        except ImportError:
+            print("  [WARNING] mlflow not installed, skipping tracking")
+            mlflow_enabled = False
+        except Exception as e:
+            print(f"  [WARNING] MLflow setup failed: {e}")
+            mlflow_enabled = False
+    else:
+        mlflow_enabled = False
+
+    # CSV training log
+    training_log_path = ckpt_dir / "training_log.csv"
+    write_csv_header = not training_log_path.exists() or training_log_path.stat().st_size == 0
+    csv_fh = open(training_log_path, "a", newline="")
+    csv_writer = csv.DictWriter(csv_fh, fieldnames=[
+        "rollout", "timestep", "mean_reward", "slo_pct", "avg_replicas",
+        "policy_loss", "value_loss", "entropy",
+    ])
+    if write_csv_header:
+        csv_writer.writeheader()
+        csv_fh.flush()
 
     # ── build env + policy ────────────────────────────────────────────────────
     env       = env_factory()
@@ -400,6 +442,42 @@ def train_ppo(
 
         rollout_num += 1
 
+        # ── write training log CSV ────────────────────────────────────────────
+        n_eps = len(history["episode_rewards"])
+        if n_eps > 0:
+            mean_rew = float(np.mean(history["episode_rewards"][-10:]))
+            mean_slo = float(np.mean(history["slo_pcts"][-10:]))
+            mean_rep = float(np.mean(history["avg_replicas"][-10:]))
+        else:
+            mean_rew = mean_slo = mean_rep = 0.0
+        
+        csv_writer.writerow({
+            "rollout": rollout_num,
+            "timestep": timestep,
+            "mean_reward": round(mean_rew, 2),
+            "slo_pct": round(mean_slo, 2),
+            "avg_replicas": round(mean_rep, 2),
+            "policy_loss": round(metrics["policy_loss"], 4),
+            "value_loss": round(metrics["value_loss"], 4),
+            "entropy": round(metrics["entropy"], 4),
+        })
+        csv_fh.flush()
+        
+        # ── MLflow metric logging ─────────────────────────────────────────────
+        if mlflow_enabled and n_eps > 0:
+            try:
+                import mlflow
+                mlflow.log_metrics({
+                    "mean_reward": mean_rew,
+                    "slo_pct": mean_slo,
+                    "avg_replicas": mean_rep,
+                    "policy_loss": metrics["policy_loss"],
+                    "value_loss": metrics["value_loss"],
+                    "entropy": metrics["entropy"],
+                }, step=rollout_num)
+            except Exception:
+                pass  # silently skip if MLflow call fails
+
         # ── checkpoint: save best ─────────────────────────────────────────────
         if history["episode_rewards"]:
             recent_reward = np.mean(history["episode_rewards"][-5:])
@@ -471,6 +549,14 @@ def train_ppo(
     )
 
     env.close()
+    csv_fh.close()
+    
+    if mlflow_enabled:
+        try:
+            import mlflow
+            mlflow.end_run()
+        except Exception:
+            pass
 
     if verbose:
         elapsed = time.time() - start_time
@@ -480,6 +566,9 @@ def train_ppo(
             print(f"  Best mean reward : {best_reward:+.2f}")
             print(f"  Final SLO%       : {np.mean(history['slo_pcts'][-10:]):.1f}%")
         print(f"  Checkpoint saved : {ckpt_path.resolve()}")
+        print(f"  Training log saved: {training_log_path.resolve()}")
+        if mlflow_enabled:
+            print(f"  MLflow tracking  : enabled")
 
     return history
 
