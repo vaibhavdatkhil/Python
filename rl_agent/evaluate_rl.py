@@ -398,18 +398,34 @@ def main() -> None:
     from data.loader import load_trace
     from rl_env.k8s_env import K8sAutoscalingEnv
 
-    df  = load_trace(cfg=cfg)
+    df = load_trace(cfg=cfg)
+
+    # Use a held-out evaluation slice (last 20% of the trace) so the agent is
+    # evaluated on data it was NOT trained on.
+    #
+    # KNOWN LIMITATION: When the trace is synthetic or only a single CSV is
+    # available, training and evaluation are drawn from the same underlying
+    # distribution.  True out-of-distribution generalisation requires a
+    # separate real-world trace file.  The slice below at least prevents the
+    # agent from being evaluated on the exact timesteps it was trained on.
+    train_frac = float(cfg["preprocessing"].get("train_frac", 0.8))
+    split_idx  = int(len(df) * train_frac)
+    eval_df    = df.iloc[split_idx:].reset_index(drop=True)
+
+    print(f"  Trace (total)  : {len(df):,} timesteps", flush=True)
+    print(f"  Eval slice     : [{split_idx:,} : {len(df):,}]  ({len(eval_df):,} steps, last {100*(1-train_frac):.0f}%)", flush=True)
+
     env_ppo = K8sAutoscalingEnv(
         cfg=cfg, model=lstm_model, scaler=scaler,
-        trace_df=df, device=device,
+        trace_df=eval_df, device=device,
     )
     env_rand = K8sAutoscalingEnv(
         cfg=cfg, model=None, scaler=None,
-        trace_df=df, device=device,
+        trace_df=eval_df, device=device,
     )
     env_hpa = K8sAutoscalingEnv(
         cfg=cfg, model=None, scaler=None,
-        trace_df=df, device=device,
+        trace_df=eval_df, device=device,
     )
 
     # ── load PPO policy ───────────────────────────────────────────────────────

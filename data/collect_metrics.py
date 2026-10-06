@@ -218,11 +218,12 @@ def collect_loop(
                 sample_count += 1
 
                 logger.info(
-                    f"[{sample_count:4d}] CPU={cpu:.3f if cpu else 'N/A':>6}  "
-                    f"Mem={mem:.3f if mem else 'N/A':>6}  "
-                    f"RPS={rps:.1f if rps else 'N/A':>5}  "
-                    f"P95={p95*1000:.1f if p95 else 'N/A':>5}ms  "
-                    f"Replicas={rep if rep else 'N/A'}"
+                    f"[{sample_count:4d}] "
+                    f"CPU={f'{cpu:.3f}' if cpu is not None else 'N/A':>6}  "
+                    f"Mem={f'{mem:.3f}' if mem is not None else 'N/A':>6}  "
+                    f"RPS={f'{rps:.1f}' if rps is not None else 'N/A':>5}  "
+                    f"P95={f'{p95*1000:.1f}' if p95 is not None else 'N/A':>5}ms  "
+                    f"Replicas={rep if rep is not None else 'N/A'}"
                 )
 
                 time.sleep(interval)

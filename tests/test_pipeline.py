@@ -121,7 +121,7 @@ class TestPPOAgent(unittest.TestCase):
         # Dummy observation matching obs_dim (60 + 15 + 15 + 1 + 1 = 92)
         dummy_obs = torch.zeros(1, 92, dtype=torch.float32)
         with torch.no_grad():
-            action, log_prob, entropy, value = policy.act(dummy_obs)
+            action, log_prob, value, entropy = policy.act(dummy_obs)
         self.assertIn(action.item(), [0, 1, 2, 3, 4])
 
 

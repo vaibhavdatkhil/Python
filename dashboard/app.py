@@ -143,22 +143,29 @@ def compute_calibration(
     inside = (act >= lo) & (act <= hi)
     return float(np.mean(inside) * 100.0) if len(inside) > 0 else 0.0
 
-def kpi_calibration(cov_pct: float, rolling_cov: float | None = None) -> str:
+def kpi_calibration(cov_pct: float, rolling_cov: float | None = None, theme: str = "dark") -> str:
     """Color-coded KPI card for CI Coverage:
     - Red   : < 60%  (miscalibrated / under-covering)
     - Amber : 60% - 85% (moderately calibrated)
     - Green : >= 85% (well calibrated, near ~90% target)
+
+    Parameters
+    ----------
+    cov_pct     : Empirical coverage percentage (0.0–100.0).
+    rolling_cov : Optional rolling coverage for the sub-line.
+    theme       : ``"dark"`` or ``"light"`` — selects palette tokens for color.
     """
+    p = get_palette(theme)
     if cov_pct < 60.0:
-        color = "#f87171"   # red
+        color = p["danger"]
         badge_lvl = "err"
         status = "Under-calibrated"
     elif cov_pct < 85.0:
-        color = "#fbbf24"   # amber
+        color = p["warning"]
         badge_lvl = "warn"
         status = "Moderately calibrated"
     else:
-        color = "#4ade80"   # green
+        color = p["success"]
         badge_lvl = "ok"
         status = "Well calibrated"
 
@@ -173,9 +180,6 @@ def kpi_calibration(cov_pct: float, rolling_cov: float | None = None) -> str:
         f'<div class="kpi-sub" style="color: {color};">{sub_text}</div>'
         f'</div>'
     )
-
-def badge(text: str, level: str = "ok") -> str:
-    return f'<span class="badge-{level}">{text}</span>'
 
 
 def _dark_layout(title: str = "", height: int = 300) -> dict:
@@ -757,7 +761,7 @@ def main():
         with k1: st.markdown(kpi("STEP", f"{step+1}/{n_test}"), unsafe_allow_html=True)
         with k2: st.markdown(kpi("MAE", f"{mae:.4f}", "lower is better"), unsafe_allow_html=True)
         with k3: st.markdown(kpi("RMSE", f"{rmse:.4f}", "lower is better"), unsafe_allow_html=True)
-        with k4: st.markdown(kpi_calibration(ci_cov, rolling_cov=rolling_cov), unsafe_allow_html=True)
+        with k4: st.markdown(kpi_calibration(ci_cov, rolling_cov=rolling_cov, theme=theme), unsafe_allow_html=True)
 
         # charts
         train_frac = cfg["preprocessing"]["train_frac"]

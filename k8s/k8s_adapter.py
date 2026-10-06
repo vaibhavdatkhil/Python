@@ -146,8 +146,8 @@ class MockK8sCluster(K8sClusterInterface):
     def get_cpu_utilization(self, deployment: str, namespace: str = "default") -> float:
         """Simulate per-pod CPU utilization based on current workload and active pods."""
         effective_replicas = max(self.active_replicas, 1)
-        # Total cluster CPU demand divided across active replicas
-        cpu_per_pod = (self.last_workload * 2.5) / effective_replicas
+        # Match the RL environment's formula: cpu_per_pod = workload / replicas
+        cpu_per_pod = self.last_workload / effective_replicas
         return float(cpu_per_pod)
 
 
@@ -385,11 +385,11 @@ class RLAutoscalingController:
         std_scaled = (upper_fc - lower_fc) / (2.0 * 1.645)  # approx std in original scale
         std_scaled = std_scaled / (self.scaler.data_range_[0] + 1e-8)
 
-        # 3. Normalised replica count [0, 1]
-        rep_norm = (current_replicas - self.min_r) / max(self.max_r - self.min_r, 1)
+        # 3. Normalised replica count [0, 1]  — must match env: r / max_r
+        rep_norm = current_replicas / max(self.max_r, 1)
 
-        # 4. Normalised CPU per pod
-        cpp_norm = min(cpu_per_pod / (self.slo_thr * 1.5), 2.0)
+        # 4. Normalised CPU per pod — must match env: clip(cpu_per_pod, 0, 1)
+        cpp_norm = min(max(cpu_per_pod, 0.0), 1.0)
 
         # Combined observation vector
         obs = np.concatenate([
@@ -435,7 +435,8 @@ class RLAutoscalingController:
                 delta_r = 0
 
         # Cooldown guard: suppress rapid oscillating changes
-        if delta_r != 0 and (step_idx - self.last_action_step) < self.cooldown_steps:
+        # Block actuation if fewer than cooldown_steps steps have elapsed since the last action.
+        if delta_r != 0 and (step_idx - self.last_action_step) <= self.cooldown_steps:
             delta_r = 0
 
         target_replicas = int(np.clip(current_replicas + delta_r, self.min_r, self.max_r))

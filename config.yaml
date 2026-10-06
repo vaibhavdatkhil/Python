@@ -48,7 +48,7 @@ rl_env:
   max_replicas: 10             # maximum pod count allowed
   initial_replicas: 3          # replicas at episode start
   slo_threshold: 0.70          # cpu-per-pod ≤ this → SLO met
-  scale_lag_steps: 2           # steps before a scaling action takes effect
+  scale_lag_steps: 1           # steps before a scaling action takes effect
   reward_slo_met: 1.0          # reward for meeting SLO each step
   reward_slo_violated: -2.0    # penalty for violating SLO each step
   reward_cost_per_replica: -0.05  # per-replica cost penalty (over-provisioning)

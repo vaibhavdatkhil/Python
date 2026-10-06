@@ -56,7 +56,8 @@ class RolloutBuffer:
     obs:      torch.Tensor = field(init=False)
     actions:  torch.Tensor = field(init=False)
     rewards:  torch.Tensor = field(init=False)
-    dones:    torch.Tensor = field(init=False)
+    dones:    torch.Tensor = field(init=False)       # terminated (true episode end)
+    truncateds: torch.Tensor = field(init=False)     # truncated (time limit, not terminal)
     log_probs: torch.Tensor = field(init=False)
     values:   torch.Tensor = field(init=False)
 
@@ -72,6 +73,7 @@ class RolloutBuffer:
         self.actions   = torch.zeros(T, dtype=torch.long)
         self.rewards   = torch.zeros(T)
         self.dones     = torch.zeros(T)
+        self.truncateds = torch.zeros(T)
         self.log_probs = torch.zeros(T)
         self.values    = torch.zeros(T)
         self.advantages = torch.zeros(T)
@@ -82,20 +84,22 @@ class RolloutBuffer:
 
     def add(
         self,
-        obs:      torch.Tensor,
-        action:   torch.Tensor,
-        reward:   float,
-        done:     bool,
-        log_prob: torch.Tensor,
-        value:    torch.Tensor,
+        obs:       torch.Tensor,
+        action:    torch.Tensor,
+        reward:    float,
+        done:      bool,
+        truncated: bool,
+        log_prob:  torch.Tensor,
+        value:     torch.Tensor,
     ) -> None:
         i = self._ptr
-        self.obs[i]       = obs.cpu()
-        self.actions[i]   = action.cpu()
-        self.rewards[i]   = reward
-        self.dones[i]     = float(done)
-        self.log_probs[i] = log_prob.cpu()
-        self.values[i]    = value.cpu()
+        self.obs[i]        = obs.cpu()
+        self.actions[i]    = action.cpu()
+        self.rewards[i]    = reward
+        self.dones[i]      = float(done)
+        self.truncateds[i] = float(truncated)
+        self.log_probs[i]  = log_prob.cpu()
+        self.values[i]     = value.cpu()
         self._ptr += 1
 
     def is_full(self) -> bool:
@@ -114,6 +118,14 @@ class RolloutBuffer:
         last_value : V(s_{T+1}) — value of the state after the last step.
         gamma      : discount factor.
         gae_lambda : GAE λ parameter.
+
+        Notes
+        -----
+        ``next_non_terminal`` is derived from ``terminated`` only, NOT from
+        ``truncated``.  A truncated step ends the episode due to a time limit
+        but the MDP has not actually reached a terminal state, so the value
+        bootstrap must remain live.  Zeroing it out on truncation (the old
+        behaviour) under-estimates returns and biases the advantage estimates.
         """
         T      = self.rollout_steps
         gae    = 0.0
@@ -121,7 +133,9 @@ class RolloutBuffer:
 
         for t in reversed(range(T)):
             if t == T - 1:
-                next_value     = last_v
+                next_value        = last_v
+                # terminated = true episode end; truncated = time-limit cutoff.
+                # Only a true termination should zero the bootstrap.
                 next_non_terminal = 1.0 - self.dones[t].item()
             else:
                 next_value        = self.values[t + 1].item()
@@ -399,7 +413,8 @@ def train_ppo(
                 obs=obs,
                 action=action,
                 reward=float(reward),
-                done=terminated or truncated,
+                done=terminated,
+                truncated=truncated,
                 log_prob=log_prob,
                 value=value,
             )
