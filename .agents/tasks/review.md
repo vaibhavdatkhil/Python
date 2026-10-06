@@ -1,17 +1,11 @@
-# K8s RL Autoscaling Dashboard — Redesign
+# Dashboard Redesign: K8s RL Autoscaling Streamlit UI
 
-The redesign restructures a single-file Streamlit app into a `ui/` module layer
-(`theme.py`, `components.py`, `charts.py`) with a centralized color system,
-glassmorphism cards, animated pod grid, and a 3-panel composite scaling-activity
-figure placed above the tabs. All existing session state keys, replay logic,
-model loading, and API calls are preserved. The dark/light toggle is wired in the
-sidebar and correctly persists in `st.session_state["theme"]`.
+The redesign restructures the Streamlit dashboard into a proper module hierarchy (`ui/theme.py`, `ui/components.py`, `ui/charts.py`, `app.py`), adds a dark/light theme system, and places the new "Pod Scaling Activity" composite visualization above the tabs. All six original tabs are present and all original session state keys are initialized. The primary concerns are a `kpi-sub` CSS class that is referenced but never defined, the Scaling Decisions tab rebuilding its chart from scratch instead of reusing the shared composite figure, the theme toggle placed in the sidebar rather than the header, and missing `@st.cache_data` on data transforms and `-> None` return type annotations on tab render functions.
 
-**Watch for:** Three hardcoded hex literals in `kpi_calibration()` bypass the
-theme system (confirmed). A duplicate `badge()` function definition in `app.py`
-silently overwrites the first and bypasses the `ui.components` delegation
-(confirmed). `.streamlit/config.toml` sets `font = "sans serif"` rather than
-Inter, and is missing Inter + custom theme color entries (confirmed).
+Watch for:
+- **`kpi-sub` undefined CSS** (confirmed) — the legacy `kpi()` helper emits `<div class="kpi-sub">` but the class is absent from `inject_css`; all legacy KPI sub-labels are invisible.
+- **Scaling Decisions tab does not reuse the composite figure** (confirmed) — spec requires `make_scaling_activity_figure` and `render_pod_grid` in the tab; the tab builds a standalone `go.Figure` instead and skips the pod grid entirely.
+- **`kpi_calibration` injects inline style** (confirmed) — palette-derived colors are used, so the hex values do come from `get_palette()`, but the function writes `style="border-left: 4px solid {color};"` directly into HTML rather than using the `.status-ok/.status-warn/.status-err` CSS classes that `metric_card()` provides. This means the calibration card does not respond to future CSS class refactors.
 
 **Verdict**: NEEDS_CHANGES
 
@@ -19,57 +13,28 @@ Inter, and is missing Inter + custom theme color entries (confirmed).
 
 ## High-level view
 
-The color-token architecture is correct: `theme.py` holds every hex literal, both
-palettes expose the same keys, and `inject_css` maps them to CSS custom
-properties. Charts and components consume `get_palette()` exclusively — except
-for `kpi_calibration()` in `app.py`, which hardcodes `#f87171`, `#fbbf24`, and
-`#4ade80` directly into inline styles. In light mode those colors will not match
-the LIGHT palette tokens, breaking the visual contract the theme system was built
-to provide.
+Theme tokens are fully centralized in `DARK`/`LIGHT` dicts in `theme.py` and surfaced through `inject_css` as CSS variables. Every Plotly figure builder calls `get_palette(theme)` and `get_plotly_template(theme)`, so theme switching propagates through all charts. The one gap is the `kpi-sub` class: the legacy `kpi()` helper in `app.py` is preserved for backward compatibility but references a CSS class that was never added to the injected stylesheet, making its sub-label text invisible in both modes.
 
-The duplicate `badge()` at line 177 of `app.py` shadows the properly-delegating
-wrapper at line 106. Every call to `badge()` in `app.py` after that point hits
-the raw inline implementation rather than the `ui.components` version. If the CSS
-class definitions in `theme.py` ever change structure, this shadow copy will drift
-silently.
+The three-panel `make_scaling_activity_figure` is present in `charts.py` with all specified elements: step-lines, filled RL area, scale-up/down markers with `+N`/`−N` labels, hold dots, proactive-scaling vrects, dynamic y-axis range, and the diverging bar panel. `render_pod_grid` in `components.py` uses `st.components.v1.html` for iframe isolation and implements `podIn`/`podOut`/`podPulse` CSS keyframe animations. Both are correctly called above the tabs in `main()`.
 
-The Pod Scaling Activity section is present above the tabs, with the 3-panel
-composite figure (`make_scaling_activity_figure`), animated pod grid
-(`render_pod_grid`), KPI metric row, simulated-data badge, and event feed — all
-per spec. The composite figure uses `make_subplots` with shared x-axis, step
-lines with filled area, scale-up/down markers with `+N`/`-N` labels, vertical
-shaded proactive bands, and a diverging bar chart in Panel C.
+The Scaling Decisions tab (`render_scaling_decisions_tab`) does not reuse these components. It builds a separate `go.Figure` with a single replica-count panel, no pod grid, no event feed, and no diverging bar chart. The spec explicitly requires reuse; the duplication also means a second independent rendering path to maintain.
 
-The `render_header` component intentionally does not embed `st.toggle` — its
-docstring explicitly calls out that Streamlit widgets can't live inside raw HTML.
-The toggle is in the sidebar instead, which is within the spec's stated
-alternatives ("top-right of the header **or sidebar**"). Session state is read
-back after the sidebar block so the chosen theme propagates correctly.
-
-The `.streamlit/config.toml` exists and sets `base = "dark"` and
-`headless = true`. However `font = "sans serif"` does not load Inter, and there
-are no `[theme]` color entries (`primaryColor`, `backgroundColor`, etc.) to
-reinforce the custom palette for users who haven't run the app long enough to
-receive the injected CSS. This is a minor gap — the CSS `@import` of Inter fires
-on every render, so fonts load correctly in practice — but the config could
-explicitly declare Inter and matching background/text colors.
-
-All eight required session state keys (`lstm_step`, `lstm_running`, `mae_acc`,
-`rmse_acc`, `cov_acc`, `rl_episode`, `rl_step`, `rl_running`) are initialized
-and used in their expected tabs. All six tab functions are present as `with
-tab_*:` blocks. Imports from `dashboard.ui.theme`, `dashboard.ui.components`, and
-`dashboard.ui.charts` are all at the top of `app.py`.
+All eight session state keys (`lstm_step`, `lstm_running`, `mae_acc`, `rmse_acc`, `cov_acc`, `rl_episode`, `rl_step`, `rl_running`) are initialized in their respective tab blocks. The `simulate_hpa_replicas` / `simulate_predictive_rl_replicas` helpers in `app.py` are data-transform functions that run on every rerun; neither carries `@st.cache_data`, so the full simulation loop re-executes on every user interaction, including theme toggles.
 
 ---
 
 <details>
-<summary>Issues (3)</summary>
+<summary>Issues (5)</summary>
 
-1. **Hardcoded hex colors in `kpi_calibration()`** — `#f87171`, `#fbbf24`, and `#4ade80` are hardcoded in `app.py` lines 153–161. In light mode these Tailwind-style reds/ambers/greens do not match the LIGHT palette's `danger`/`warning`/`success` tokens (`#cf222e`, `#9a6700`, `#1a7f37`). Replace with `p = get_palette(theme)` and reference `p["danger"]`, `p["warning"]`, `p["success"]` — requires passing `theme` to `kpi_calibration()`.
+1. **`kpi-sub` class missing from CSS** — the legacy `kpi()` helper emits `<div class="kpi-sub">` but `inject_css` in `theme.py` defines no `.kpi-sub` rule. All sub-labels in the Forecasting, RL, and Training KPI rows are invisible. Add `.kpi-sub { font-size: 0.68rem; color: var(--text-secondary); }` to `inject_css`, or migrate all callers to `metric_card()` which uses the correctly defined `.kpi-delta`.
 
-2. **Duplicate `badge()` definition shadows the delegating wrapper** — `app.py` defines `badge()` twice: the first (line 106) correctly delegates to `ui.components.badge`; the second (line 177) is a raw inline implementation that overwrites the first in Python's namespace. All `badge()` calls in `app.py` after line 177 bypass `ui.components`. Remove the second definition.
+2. **Scaling Decisions tab does not reuse the composite figure or pod grid** — `render_scaling_decisions_tab` constructs a standalone `go.Figure` and omits `render_pod_grid`, `render_event_feed`, and `make_scaling_activity_figure`. The spec requires reuse of these components. Refactor the function to call `make_scaling_activity_figure` (passing available CPU/forecast arrays) and `render_pod_grid` for the current endpoint replicas.
 
-3. **`config.toml` does not declare Inter or theme color tokens** — `font = "sans serif"` will not load Inter for browsers that can't hit Google Fonts (air-gapped envs, CI). Add `font = "monospace"` or simply remove the font key and rely on the `@import` in `inject_css`. Optionally populate `primaryColor`, `backgroundColor`, `secondaryBackgroundColor`, `textColor` in `[theme]` so the Streamlit default chrome (sidebar, modals) also matches the custom palette from the first render frame.
+3. **`kpi_calibration` bypasses component abstraction** — writes `style="border-left: 4px solid {color};"` inline rather than using `metric_card(..., status=badge_lvl)`. If the card CSS is refactored, this function will desync. Migrate to `metric_card()`.
+
+4. **`simulate_hpa_replicas` and `simulate_predictive_rl_replicas` not cached** — both functions run O(n) loops on every rerun, including theme toggles. The spec requires `@st.cache_data` on data transforms. Wrap the simulation calls (or the functions themselves) with `@st.cache_data`.
+
+5. **`render_scaling_decisions_tab` and `render_training_tab` missing return type annotation** — all other public functions in `components.py` and `charts.py` carry `-> str` or `-> go.Figure`. These two render functions lack `-> None`, breaking the consistent type-hint contract the spec requires.
 
 </details>
 
@@ -78,22 +43,45 @@ tab_*:` blocks. Imports from `dashboard.ui.theme`, `dashboard.ui.components`, an
 <details>
 <summary>Details</summary>
 
-### Hardcoded hex colors in `kpi_calibration()` bypass theme system
+## `kpi-sub` CSS class absent from stylesheet
 
-`kpi_calibration()` in `app.py` (lines 153–161) constructs inline `style=` attributes with `#f87171` (Tailwind red-400), `#fbbf24` (Tailwind amber-400), and `#4ade80` (Tailwind green-400). These are dark-mode-friendly Tailwind values that do not correspond to the LIGHT palette's danger/warning/success tokens. In light mode, the CI Coverage card will show a washed-out pastel red against a white card surface rather than the palette's saturated `#cf222e`. The function also does not accept a `theme` argument, making the mismatch structural rather than accidental.
+The `kpi()` helper at line 93 of `app.py` is preserved for backward compatibility and emits:
 
-Fix: add `theme: str = "dark"` parameter, call `get_palette(theme)`, replace the three literals with `p["danger"]`, `p["warning"]`, `p["success"]`.
+```html
+<div class="kpi-sub">{sub}</div>
+```
 
-### Duplicate `badge()` silently breaks component isolation
+`inject_css` in `theme.py` defines `.kpi-label`, `.kpi-value`, `.kpi-delta`, and `.kpi-icon` — but not `.kpi-sub`. Any tab that still calls `kpi()` with a sub-label (Forecasting step/MAE/RMSE KPIs, RL tab reward/SLO/replicas KPIs, Training tab final-reward/SLO/replicas KPIs) renders those sub-labels as unstyled text inheriting nothing, which in dark mode makes them indistinguishable from the background. This is confirmed by tracing `inject_css` end-to-end; the class string does not appear anywhere in the generated `<style>` block.
 
-`app.py` defines `badge()` at line 106 as a thin wrapper that calls `_badge_ui` from `ui.components`, preserving the single-source-of-truth contract. A second `def badge(...)` at line 177 — an unconditional inline reimplementation — overwrites the first name in the module namespace. Python executes both `def` statements; the second wins. From line 177 onward, every `badge("Online", "ok")` call in the API Status tab, the sidebar model status block, and anywhere else in `app.py` hits the bare implementation. The intent of the first wrapper is voided without any import or lint error.
+## Scaling Decisions tab: duplicate figure builder, missing pod grid
 
-The second definition appears to be a copy-paste survival from the pre-refactor code. It should be deleted.
+`render_scaling_decisions_tab` creates `fig_scale = go.Figure()` and manually adds HPA and RL Agent scatter traces, then calls `_get_layout()` directly. This duplicates the replica-count logic already in `make_scaling_activity_figure` Panel A, but it:
 
-### `config.toml` gap — font and palette tokens
+- Has no Panel B (CPU/forecast overlay) or Panel C (diverging bar chart).
+- Does not call `render_pod_grid`, so the tab has no animated pod visualisation.
+- Does not call `render_event_feed`, so the tab shows no latest-decisions feed.
+- Uses `st.caption(...)` for the simulated-data notice rather than the dedicated `render_simulated_badge()`.
 
-`font = "sans serif"` in `[theme]` does not instruct the browser to load Inter — it tells Streamlit's component system to use a generic sans-serif stack. Inter arrives only through the `@import url(...)` inside `inject_css()`, which fires on every Streamlit render. For environments where Google Fonts is blocked this silently degrades. Adding `font = "sans serif"` is harmless but provides no benefit over the existing `@import`; removing it or leaving it as-is are both acceptable. The more meaningful gap is the absence of `primaryColor`, `backgroundColor`, `secondaryBackgroundColor`, and `textColor` under `[theme]`. Without these, the Streamlit-native chrome (sidebar top bar, modal dialogs, file uploader) renders in Streamlit's own dark defaults on the very first frame before `inject_css` fires, producing a flash of un-themed UI.
+The spec states "Scaling Decisions: reuse the new Pod Scaling Activity components, plus a comparison table". None of those reuse points are present.
 
+## `kpi_calibration` inline style vs. component system
+
+`kpi_calibration` computes `color = p["danger" | "warning" | "success"]` from the palette, then injects it as `style="border-left: 4px solid {color}; ... style="color: {color};"`. The component system's `metric_card()` already exposes a `status` parameter that maps `"ok"/"warn"/"err"` to the same CSS-variable-driven border rules without inline styles. The calibration card is the only card that writes inline styles; it will not benefit from future CSS-variable transitions and is invisible to the theme test path.
+
+## Missing `@st.cache_data` on simulation helpers
+
+`simulate_hpa_replicas` and `simulate_predictive_rl_replicas` are called unconditionally in `main()` on the main page on every Streamlit rerun. Each runs an O(n) Python loop (n=200 for the default slice). A theme toggle, sidebar slider move, or any widget interaction triggers a full rerun. The spec explicitly calls for `@st.cache_data` on data transforms. Neither function nor its call sites use it. For `render_scaling_decisions_tab`, the same functions are called again inside the tab, doubling the work.
+
+## Tab render functions missing return type annotations
+
+`render_scaling_decisions_tab` and `render_training_tab` are defined without a return type:
+
+```python
+def render_scaling_decisions_tab(cfg: dict, df_full: pd.DataFrame, rl_ep: dict | None = None, theme: str = "dark"):
+def render_training_tab(ppo_history: dict | None = None, theme: str = "dark"):
+```
+
+All functions in `components.py` and `charts.py` are fully annotated. The spec requires type hints on new functions. Adding `-> None` is the fix.
 
 </details>
 
@@ -102,11 +90,13 @@ The second definition appears to be a copy-paste survival from the pre-refactor 
 <details>
 <summary>File map</summary>
 
-- `dashboard/app.py` — main entry; contains hardcoded hex colors in `kpi_calibration()`, duplicate `badge()` definition; all session state, tabs, Pod Scaling Activity section present
-- `dashboard/ui/theme.py` — centralized color palettes (DARK/LIGHT), `get_palette()`, `get_plotly_template()`, `inject_css()` — fully compliant, no stray hex outside palette definitions
-- `dashboard/ui/components.py` — `metric_card`, `render_metric_row`, `badge`, `render_header`, `render_pod_grid`, `render_event_feed`, `render_progress_bar`, `render_how_to_read`, `render_footer`, `render_simulated_badge`, `render_section_header` — all present with type hints and docstrings
-- `dashboard/ui/charts.py` — `make_scaling_activity_figure`, `make_workload_trace_figure`, `make_forecast_figure`, `make_rolling_mae_figure`, `make_replica_trace_figure`, `make_cpu_per_pod_figure`, `make_action_distribution_figure`, `make_cumulative_reward_figure`, `make_training_reward_figure`, `make_loss_curves_figure`, `make_training_history_figure` — all present with type hints and docstrings
-- `.streamlit/config.toml` — exists; base dark mode, headless server; missing Inter font entry and palette color tokens
+| File | What changed |
+|---|---|
+| `dashboard/ui/theme.py` | New file: `DARK`/`LIGHT` palette dicts, `get_palette()`, `get_plotly_template()`, `inject_css()` |
+| `dashboard/ui/components.py` | New file: `metric_card`, `render_metric_row`, `render_pod_grid`, `render_header`, `render_event_feed`, `render_section_header`, `render_footer`, `render_progress_bar`, `render_how_to_read`, `render_simulated_badge`, `badge` |
+| `dashboard/ui/charts.py` | New file: `make_scaling_activity_figure` (3-panel composite), plus all single-panel figure builders for Forecasting, RL, Training tabs |
+| `dashboard/app.py` | Restructured entry point: sidebar toggle, Pod Scaling Activity section above tabs, 6 `with tab_*:` blocks, legacy `kpi()`/`badge()`/`_dark_layout()` wrappers preserved |
+| `.streamlit/config.toml` | New file: dark base theme, primaryColor/backgroundColor/textColor tokens, headless server config |
 
 Full diff: `git diff main -- dashboard/ .streamlit/`
 

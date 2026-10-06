@@ -2,22 +2,34 @@
   "verdict": "CHANGES_REQUESTED",
   "findings": [
     {
-      "label": "Hardcoded hex colors in kpi_calibration()",
+      "id": 1,
+      "label": "kpi-sub class missing from CSS",
       "severity": "HIGH",
-      "description": "#f87171, #fbbf24, and #4ade80 are hardcoded in app.py lines 153-161. In light mode these do not match the LIGHT palette tokens (danger=#cf222e, warning=#9a6700, success=#1a7f37). Fix: add theme parameter, call get_palette(theme), replace literals with p[\"danger\"], p[\"warning\"], p[\"success\"].",
-      "confidence": "confirmed"
+      "description": "The legacy kpi() helper emits <div class=\"kpi-sub\"> but inject_css in theme.py defines no .kpi-sub rule. All sub-labels in the Forecasting, RL, and Training KPI rows are invisible in both dark and light mode. Add .kpi-sub { font-size: 0.68rem; color: var(--text-secondary); } to inject_css, or migrate all callers to metric_card() which uses the correctly defined .kpi-delta."
     },
     {
-      "label": "Duplicate badge() definition shadows delegating wrapper",
-      "severity": "MEDIUM",
-      "description": "app.py defines badge() twice — line 106 (delegates to ui.components) and line 177 (raw inline). Python's namespace keeps only the second. All badge() calls after line 177 bypass ui.components. Remove the second definition.",
-      "confidence": "confirmed"
+      "id": 2,
+      "label": "Scaling Decisions tab does not reuse composite figure or pod grid",
+      "severity": "HIGH",
+      "description": "render_scaling_decisions_tab constructs a standalone go.Figure and omits render_pod_grid, render_event_feed, and make_scaling_activity_figure. The spec requires reuse of these components. The tab has no Panel B/C, no animated pod grid, and no event feed. Refactor to call make_scaling_activity_figure and render_pod_grid."
     },
     {
-      "label": "config.toml missing Inter font and palette color tokens",
+      "id": 3,
+      "label": "kpi_calibration bypasses component abstraction with inline styles",
       "severity": "MEDIUM",
-      "description": "font = \"sans serif\" does not load Inter. Absence of primaryColor/backgroundColor/secondaryBackgroundColor/textColor means Streamlit-native chrome flashes default styling on the first render frame before inject_css fires. Populate [theme] color tokens and remove or update the font key.",
-      "confidence": "confirmed"
+      "description": "kpi_calibration writes style=\"border-left: 4px solid {color};\" inline rather than using metric_card(..., status=badge_lvl). The calibration card will not respond to future CSS-variable refactors and is invisible to the theme test path. Migrate to metric_card()."
+    },
+    {
+      "id": 4,
+      "label": "simulate_hpa_replicas and simulate_predictive_rl_replicas not cached",
+      "severity": "MEDIUM",
+      "description": "Both functions run O(n) Python loops on every Streamlit rerun, including theme toggles and sidebar slider interactions. The spec requires @st.cache_data on data transforms. Wrap the simulation calls or the functions themselves with @st.cache_data."
+    },
+    {
+      "id": 5,
+      "label": "render_scaling_decisions_tab and render_training_tab missing return type annotations",
+      "severity": "LOW",
+      "description": "Both render functions lack -> None. All functions in components.py and charts.py are fully annotated. Adding -> None restores the consistent type-hint contract the spec requires."
     }
   ],
   "reviewDoc": "c:\\Users\\admin\\OneDrive\\Desktop\\BtechProject\\.agents\\tasks\\review.md"

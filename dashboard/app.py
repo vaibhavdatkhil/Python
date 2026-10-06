@@ -144,9 +144,11 @@ def compute_calibration(
     return float(np.mean(inside) * 100.0) if len(inside) > 0 else 0.0
 
 def kpi_calibration(cov_pct: float, rolling_cov: float | None = None, theme: str = "dark") -> str:
-    """Color-coded KPI card for CI Coverage:
+    """Color-coded KPI card for CI Coverage using metric_card() abstraction.
+
+    Color logic:
     - Red   : < 60%  (miscalibrated / under-covering)
-    - Amber : 60% - 85% (moderately calibrated)
+    - Amber : 60%–85% (moderately calibrated)
     - Green : >= 85% (well calibrated, near ~90% target)
 
     Parameters
@@ -155,30 +157,27 @@ def kpi_calibration(cov_pct: float, rolling_cov: float | None = None, theme: str
     rolling_cov : Optional rolling coverage for the sub-line.
     theme       : ``"dark"`` or ``"light"`` — selects palette tokens for color.
     """
-    p = get_palette(theme)
     if cov_pct < 60.0:
-        color = p["danger"]
-        badge_lvl = "err"
-        status = "Under-calibrated"
+        status = "err"
+        cal_label = "Under-calibrated"
     elif cov_pct < 85.0:
-        color = p["warning"]
-        badge_lvl = "warn"
-        status = "Moderately calibrated"
+        status = "warn"
+        cal_label = "Moderately calibrated"
     else:
-        color = p["success"]
-        badge_lvl = "ok"
-        status = "Well calibrated"
+        status = "ok"
+        cal_label = "Well calibrated"
 
-    sub_text = f"target ≈ 90% | {status}"
+    delta_text = f"target ≈ 90% | {cal_label}"
     if rolling_cov is not None:
-        sub_text = f"rolling: {rolling_cov:.1f}% | {status}"
+        delta_text = f"rolling: {rolling_cov:.1f}% | {cal_label}"
 
-    return (
-        f'<div class="kpi-card" style="border-left: 4px solid {color};">'
-        f'<div class="kpi-label">CI COVERAGE</div>'
-        f'<div class="kpi-value" style="color: {color};">{cov_pct:.1f}%</div>'
-        f'<div class="kpi-sub" style="color: {color};">{sub_text}</div>'
-        f'</div>'
+    return metric_card(
+        label="CI COVERAGE",
+        value=f"{cov_pct:.1f}%",
+        delta=delta_text,
+        icon="🎯",
+        status=status,
+        theme=theme,
     )
 
 
@@ -254,16 +253,57 @@ def simulate_predictive_rl_replicas(
     return replicas
 
 
-def render_scaling_decisions_tab(cfg: dict, df_full: pd.DataFrame, rl_ep: dict | None = None, theme: str = "dark"):
-    """Render the Scaling Decisions comparison tab (HPA vs Predictive RL)."""
+@st.cache_data(show_spinner=False)
+def _cached_simulate_hpa(
+    cpu_tuple: tuple,
+    min_replicas: int,
+    max_replicas: int,
+    target_slo: float,
+    initial_replicas: int,
+    lag: int,
+) -> np.ndarray:
+    """Cached wrapper for simulate_hpa_replicas.
+
+    Accepts cpu_series as a tuple for hashability. Called by the main page
+    and Scaling Decisions tab to avoid re-running the O(n) loop on every rerun.
+    """
+    return simulate_hpa_replicas(
+        np.array(cpu_tuple), min_replicas, max_replicas, target_slo, initial_replicas, lag
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _cached_simulate_rl(
+    cpu_tuple: tuple,
+    min_replicas: int,
+    max_replicas: int,
+    target_slo: float,
+    initial_replicas: int,
+) -> np.ndarray:
+    """Cached wrapper for simulate_predictive_rl_replicas.
+
+    Accepts cpu_series as a tuple for hashability. Called by the main page
+    and Scaling Decisions tab to avoid re-running the O(n) loop on every rerun.
+    """
+    return simulate_predictive_rl_replicas(
+        np.array(cpu_tuple), min_replicas, max_replicas, target_slo, initial_replicas
+    )
+
+
+def render_scaling_decisions_tab(cfg: dict, df_full: pd.DataFrame, rl_ep: dict | None = None, theme: str = "dark") -> None:
+    """Render the Scaling Decisions comparison tab (HPA vs Predictive RL).
+
+    Reuses make_scaling_activity_figure, render_pod_grid, and render_event_feed
+    for a consistent presentation with the main-page Pod Scaling Activity section.
+    """
     st.markdown("### ⚙️ Autoscaling Behavior: Reactive HPA vs Predictive RL")
-    
+
     min_r   = cfg["rl_env"]["min_replicas"]
     max_r   = cfg["rl_env"]["max_replicas"]
     slo_thr = cfg["rl_env"]["slo_threshold"]
     init_r  = cfg["rl_env"]["initial_replicas"]
     lag     = cfg["rl_env"]["scale_lag_steps"]
-    
+
     # Check if real RL agent data is available from session state
     is_simulated = True
     if rl_ep is not None and len(rl_ep.get("replicas", [])) > 0:
@@ -272,87 +312,81 @@ def render_scaling_decisions_tab(cfg: dict, df_full: pd.DataFrame, rl_ep: dict |
         n_steps = len(rl_replicas)
         cpu_window = np.array(rl_ep["cpu_per_pod"][:n_steps]) * rl_replicas
         hpa_replicas = simulate_hpa_replicas(cpu_window, min_r, max_r, slo_thr, init_r, lag=lag)
+        cpu_series = cpu_window
     else:
         # Generate plausible synthetic series from the workload trace
         sample_slice = df_full["cpu_util"].iloc[:200].to_numpy()
         hpa_replicas = simulate_hpa_replicas(sample_slice, min_r, max_r, slo_thr, init_r, lag=lag)
         rl_replicas  = simulate_predictive_rl_replicas(sample_slice, min_r, max_r, slo_thr, init_r)
         n_steps = len(sample_slice)
+        cpu_series = sample_slice
 
     # Compute action differences for RL agent
     diffs = np.diff(rl_replicas, prepend=rl_replicas[0])
     up_idx   = np.where(diffs > 0)[0]
     down_idx = np.where(diffs < 0)[0]
-    hold_idx = np.where(diffs == 0)[0]
 
-    # Metrics row
-    m1, m2, m3 = st.columns(3)
-    with m1:
-        st.markdown(kpi("AVG REPLICAS (HPA)", f"{np.mean(hpa_replicas):.2f}", "Reactive baseline"), unsafe_allow_html=True)
-    with m2:
-        st.markdown(kpi("AVG REPLICAS (RL AGENT)", f"{np.mean(rl_replicas):.2f}", "Predictive autoscaler"), unsafe_allow_html=True)
-    with m3:
-        total_actions = len(up_idx) + len(down_idx)
-        st.markdown(kpi("SCALING ACTIONS TRIGGERED", f"{total_actions}", f"↑ {len(up_idx)} up | ↓ {len(down_idx)} down"), unsafe_allow_html=True)
+    # KPI metrics row
+    avg_hpa = float(np.mean(hpa_replicas))
+    avg_rl  = float(np.mean(rl_replicas))
+    total_actions = int(len(up_idx) + len(down_idx))
+    cost_savings = max(0.0, (avg_hpa - avg_rl) / max(avg_hpa, 1e-3) * 100)
 
-    # Time series step chart
-    steps = np.arange(n_steps)
-    p = get_palette(theme)
-    fig_scale = go.Figure()
+    render_metric_row([
+        {"label": "Avg Replicas (HPA)",       "value": f"{avg_hpa:.2f}",         "icon": "⚙️",  "delta": "Reactive baseline"},
+        {"label": "Avg Replicas (RL Agent)",   "value": f"{avg_rl:.2f}",          "icon": "🤖",  "delta": "Predictive autoscaler"},
+        {"label": "Scaling Actions Triggered", "value": str(total_actions),       "icon": "⚡",  "delta": f"↑ {len(up_idx)} up | ↓ {len(down_idx)} down"},
+        {"label": "Est. Cost Savings vs HPA",  "value": f"{cost_savings:.1f}%",   "icon": "💰",  "status": "ok"},
+    ], theme=theme)
 
-    # HPA line (step)
-    fig_scale.add_trace(go.Scatter(
-        x=steps, y=hpa_replicas,
-        mode="lines", name="HPA (reactive baseline)",
-        line=dict(color=p["danger"], width=2, shape="hv", dash="dash"),
-    ))
+    if is_simulated:
+        render_simulated_badge()
 
-    # RL Agent line (step)
-    fig_scale.add_trace(go.Scatter(
-        x=steps, y=rl_replicas,
-        mode="lines", name="RL Agent (predictive)",
-        line=dict(color=p["accent"], width=2.5, shape="hv"),
-    ))
+    # Animated pod grid
+    cur_rl  = int(rl_replicas[-1])
+    cur_hpa = int(hpa_replicas[-1])
+    prev_rl  = int(rl_replicas[-2]) if len(rl_replicas) > 1 else cur_rl
+    prev_hpa = int(hpa_replicas[-2]) if len(hpa_replicas) > 1 else cur_hpa
+    render_pod_grid(cur_rl, prev_rl, cur_hpa, prev_hpa, theme=theme)
 
-    # Overlay Action markers on RL line
-    if len(up_idx) > 0:
-        fig_scale.add_trace(go.Scatter(
-            x=up_idx, y=rl_replicas[up_idx],
-            mode="markers", name="Action: Scale Up",
-            marker=dict(symbol="triangle-up", size=10, color=p["success"]),
-        ))
-    if len(down_idx) > 0:
-        fig_scale.add_trace(go.Scatter(
-            x=down_idx, y=rl_replicas[down_idx],
-            mode="markers", name="Action: Scale Down",
-            marker=dict(symbol="triangle-down", size=10, color=p["warning"]),
-        ))
-    if len(hold_idx) > 0:
-        fig_scale.add_trace(go.Scatter(
-            x=hold_idx, y=rl_replicas[hold_idx],
-            mode="markers", name="Action: Hold",
-            marker=dict(symbol="circle", size=4, color=p["text_secondary"], opacity=0.6),
-        ))
-
-    fig_scale.update_layout(**_get_layout("Pod Replica Count: HPA Baseline vs RL Agent", 350, theme))
-    fig_scale.update_layout(
-        xaxis=dict(title="Timestep (minutes)"),
-        yaxis=dict(title="Pod Replicas", range=[0, max(int(hpa_replicas.max()), int(rl_replicas.max())) + 2], dtick=1),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    # Composite 3-panel figure (reuses the same builder as the main page)
+    fig_scale = make_scaling_activity_figure(
+        hpa_replicas, rl_replicas, cpu_series,
+        mean_fc=None, lower_fc=None, upper_fc=None,
+        slo_threshold=slo_thr,
+        is_simulated=is_simulated,
+        theme=theme,
     )
     st.plotly_chart(fig_scale, use_container_width=True, key="fig_scaling_decisions")
-    st.caption(
-        "*Dashed red = HPA reactive baseline, solid blue = predictive RL agent | Markers: ▲ green = scale up, ▼ amber = scale down, • gray = hold.*"
+
+    render_how_to_read(
+        "**Panel A (top):** Step-line replica counts — dashed red = HPA reactive baseline, "
+        "solid blue = predictive RL agent. ▲ = scale-up event, ▼ = scale-down event. "
+        "Green shaded bands = steps where RL scaled proactively before HPA reacted.\n\n"
+        "**Panel B (middle):** CPU utilisation trace with SLO threshold (dashed red).\n\n"
+        "**Panel C (bottom):** Diverging bars — green = pods added, red = pods removed per step."
     )
 
+    # Latest scaling decisions event feed
+    events = []
+    for i in np.where(np.abs(diffs) > 0)[0][-5:][::-1]:
+        act = "UP" if diffs[i] > 0 else "DOWN"
+        events.append({
+            "timestamp": f"t={i}",
+            "action":    act,
+            "from_r":    int(rl_replicas[i] - diffs[i]),
+            "to_r":      int(rl_replicas[i]),
+            "reason":    "Forecast spike" if act == "UP" else "Load normalized",
+        })
+    render_event_feed(events, theme=theme)
+
+    # Source annotation
     if is_simulated:
         st.caption(
             "*(Simulated series driven by workload trace — run an episode in the RL Episode Replay tab to stream live agent decisions)*"
         )
     else:
-        st.caption(
-            "*(Live series extracted from most recent PPO agent episode)*"
-        )
+        st.caption("*(Live series extracted from most recent PPO agent episode)*")
 
 
 def render_training_tab(ppo_history: dict | None = None, theme: str = "dark"):

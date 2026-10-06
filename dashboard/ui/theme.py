@@ -215,6 +215,14 @@ html, body, [class*="css"] {{
 .kpi-delta {{
   font-size: 0.68rem; color: var(--text-secondary); margin-top: 0.1rem;
 }}
+/* Legacy sub-label used by kpi() helper — matches .kpi-delta styling */
+.kpi-sub {{
+  font-size: 0.68rem; color: var(--text-secondary); margin-top: 0.1rem;
+}}
+/* Legacy sub-label used by kpi() helper — matches .kpi-delta styling */
+.kpi-sub {{
+  font-size: 0.68rem; color: var(--text-secondary); margin-top: 0.1rem;
+}}
 
 /* ── Badges ── */
 .badge-ok {{
