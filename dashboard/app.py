@@ -33,6 +33,36 @@ PROJECT_ROOT = Path(__file__).parent.parent
 # Ensure project root is on sys.path so package imports work from any cwd
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+# ── UI module imports ─────────────────────────────────────────────────────────
+from dashboard.ui.theme import inject_css, get_palette
+from dashboard.ui.components import (
+    metric_card,
+    render_metric_row,
+    render_pod_grid,
+    render_header,
+    render_simulated_badge,
+    render_event_feed,
+    render_section_header,
+    render_footer,
+    render_progress_bar,
+    render_how_to_read,
+    badge as _badge_ui,
+)
+from dashboard.ui.charts import (
+    _get_layout,
+    make_scaling_activity_figure,
+    make_workload_trace_figure,
+    make_forecast_figure,
+    make_rolling_mae_figure,
+    make_replica_trace_figure,
+    make_cpu_per_pod_figure,
+    make_action_distribution_figure,
+    make_cumulative_reward_figure,
+    make_training_reward_figure,
+    make_loss_curves_figure,
+    make_training_history_figure,
+)
 CONFIG_PATH  = PROJECT_ROOT / "config.yaml"
 LSTM_CKPT    = PROJECT_ROOT / "checkpoints" / "best_model.pt"
 PPO_CKPT     = PROJECT_ROOT / "checkpoints" / "ppo_agent.pt"
@@ -58,47 +88,12 @@ if HIDE_STREAMLIT_UI:
         unsafe_allow_html=True,
     )
 
-# ── global CSS ────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
-  html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-
-  /* metric cards */
-  .kpi-card {
-    background: linear-gradient(135deg, rgba(88,166,255,0.08), rgba(63,185,80,0.06));
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 14px;
-    padding: 1rem 1.4rem;
-    margin-bottom: 0.6rem;
-    transition: transform 0.15s ease, box-shadow 0.15s ease;
-  }
-  .kpi-card:hover { transform: translateY(-2px); box-shadow: 0 4px 20px rgba(88,166,255,0.15); }
-  .kpi-label { font-size: 0.73rem; color: #94a3b8; letter-spacing: 0.07em; text-transform: uppercase; }
-  .kpi-value { font-size: 1.7rem; font-weight: 700; color: #f1f5f9; line-height: 1.2; }
-  .kpi-sub   { font-size: 0.70rem; color: #475569; margin-top: 0.1rem; }
-
-  /* status badges */
-  .badge-ok   { display:inline-block; background:#1a4731; color:#3fb950;
-                border-radius:6px; padding:2px 10px; font-size:0.78rem; font-weight:600; }
-  .badge-warn { display:inline-block; background:#3d2a00; color:#ffa657;
-                border-radius:6px; padding:2px 10px; font-size:0.78rem; font-weight:600; }
-  .badge-err  { display:inline-block; background:#4a1322; color:#f78166;
-                border-radius:6px; padding:2px 10px; font-size:0.78rem; font-weight:600; }
-
-  /* tab styling */
-  button[data-baseweb="tab"] { font-size: 0.9rem; font-weight: 600; }
-
-  h1 { color: #f1f5f9 !important; }
-  .stSidebar { background: #0a0f1c; border-right: 1px solid #1e293b; }
-  hr { border-color: #1e293b; }
-</style>
-""", unsafe_allow_html=True)
-
-
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def kpi(label: str, value: str, sub: str = "") -> str:
+    """Legacy KPI card helper — preserved for backward compatibility.
+    New code should use metric_card() from dashboard.ui.components.
+    """
     return (
         f'<div class="kpi-card">'
         f'<div class="kpi-label">{label}</div>'
@@ -106,6 +101,11 @@ def kpi(label: str, value: str, sub: str = "") -> str:
         f'<div class="kpi-sub">{sub}</div>'
         f'</div>'
     )
+
+
+def badge(text: str, level: str = "ok") -> str:
+    """Legacy badge helper — delegates to ui.components.badge."""
+    return _badge_ui(text, level)
 
 # ── CALIBRATION FIX HELPERS ───────────────────────────────────────────────────
 # Explanation for B.Tech project review:
@@ -177,17 +177,13 @@ def kpi_calibration(cov_pct: float, rolling_cov: float | None = None) -> str:
 def badge(text: str, level: str = "ok") -> str:
     return f'<span class="badge-{level}">{text}</span>'
 
+
 def _dark_layout(title: str = "", height: int = 300) -> dict:
-    return dict(
-        title=title, title_font_color="#f1f5f9",
-        plot_bgcolor="#0d1117", paper_bgcolor="#0d1117",
-        font_color="#94a3b8",
-        xaxis=dict(gridcolor="#1e293b", showgrid=True),
-        yaxis=dict(gridcolor="#1e293b", showgrid=True),
-        margin=dict(l=45, r=20, t=40, b=45),
-        height=height,
-        legend=dict(bgcolor="rgba(0,0,0,0)", bordercolor="#1e293b"),
-    )
+    """Legacy dark layout helper — delegates to _get_layout() from ui.charts.
+    Preserved so existing call sites continue to work unchanged.
+    """
+    return _get_layout(title=title, height=height, theme="dark")
+
 
 
 # ── SCALING DECISIONS HELPERS ─────────────────────────────────────────────────
@@ -254,7 +250,7 @@ def simulate_predictive_rl_replicas(
     return replicas
 
 
-def render_scaling_decisions_tab(cfg: dict, df_full: pd.DataFrame, rl_ep: dict | None = None):
+def render_scaling_decisions_tab(cfg: dict, df_full: pd.DataFrame, rl_ep: dict | None = None, theme: str = "dark"):
     """Render the Scaling Decisions comparison tab (HPA vs Predictive RL)."""
     st.markdown("### ⚙️ Autoscaling Behavior: Reactive HPA vs Predictive RL")
     
@@ -297,20 +293,21 @@ def render_scaling_decisions_tab(cfg: dict, df_full: pd.DataFrame, rl_ep: dict |
 
     # Time series step chart
     steps = np.arange(n_steps)
+    p = get_palette(theme)
     fig_scale = go.Figure()
 
     # HPA line (step)
     fig_scale.add_trace(go.Scatter(
         x=steps, y=hpa_replicas,
         mode="lines", name="HPA (reactive baseline)",
-        line=dict(color="#f87171", width=2, shape="hv", dash="dash"),
+        line=dict(color=p["danger"], width=2, shape="hv", dash="dash"),
     ))
 
     # RL Agent line (step)
     fig_scale.add_trace(go.Scatter(
         x=steps, y=rl_replicas,
         mode="lines", name="RL Agent (predictive)",
-        line=dict(color="#38bdf8", width=2.5, shape="hv"),
+        line=dict(color=p["accent"], width=2.5, shape="hv"),
     ))
 
     # Overlay Action markers on RL line
@@ -318,25 +315,25 @@ def render_scaling_decisions_tab(cfg: dict, df_full: pd.DataFrame, rl_ep: dict |
         fig_scale.add_trace(go.Scatter(
             x=up_idx, y=rl_replicas[up_idx],
             mode="markers", name="Action: Scale Up",
-            marker=dict(symbol="triangle-up", size=10, color="#4ade80"),
+            marker=dict(symbol="triangle-up", size=10, color=p["success"]),
         ))
     if len(down_idx) > 0:
         fig_scale.add_trace(go.Scatter(
             x=down_idx, y=rl_replicas[down_idx],
             mode="markers", name="Action: Scale Down",
-            marker=dict(symbol="triangle-down", size=10, color="#fbbf24"),
+            marker=dict(symbol="triangle-down", size=10, color=p["warning"]),
         ))
     if len(hold_idx) > 0:
         fig_scale.add_trace(go.Scatter(
             x=hold_idx, y=rl_replicas[hold_idx],
             mode="markers", name="Action: Hold",
-            marker=dict(symbol="circle", size=4, color="#94a3b8", opacity=0.6),
+            marker=dict(symbol="circle", size=4, color=p["text_secondary"], opacity=0.6),
         ))
 
-    fig_scale.update_layout(**_dark_layout("Pod Replica Count: HPA Baseline vs RL Agent", 350))
+    fig_scale.update_layout(**_get_layout("Pod Replica Count: HPA Baseline vs RL Agent", 350, theme))
     fig_scale.update_layout(
         xaxis=dict(title="Timestep (minutes)"),
-        yaxis=dict(title="Pod Replicas", range=[min_r - 0.5, max_r + 0.5], dtick=1),
+        yaxis=dict(title="Pod Replicas", range=[0, max(int(hpa_replicas.max()), int(rl_replicas.max())) + 2], dtick=1),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
     st.plotly_chart(fig_scale, use_container_width=True, key="fig_scaling_decisions")
@@ -354,7 +351,7 @@ def render_scaling_decisions_tab(cfg: dict, df_full: pd.DataFrame, rl_ep: dict |
         )
 
 
-def render_training_tab(ppo_history: dict | None = None):
+def render_training_tab(ppo_history: dict | None = None, theme: str = "dark"):
     """Render the Training progress tab (real training_log.csv + checkpoint history)."""
     st.markdown("### 🎓 RL Policy Training & Convergence")
     
@@ -368,14 +365,15 @@ def render_training_tab(ppo_history: dict | None = None):
             if len(df_log) == 0:
                 st.warning("training_log.csv exists but is empty. Run `python -m rl_agent.train_rl` first.")
             else:
-                # Plot reward curve
+                # Plot reward curve using themed chart builder
+                _tp = get_palette(theme)
                 fig_train = go.Figure()
                 fig_train.add_trace(go.Scatter(
                     x=df_log["rollout"], y=df_log["mean_reward"],
                     mode="lines", name="Mean Reward (rolling-10 episodes)",
-                    line=dict(color="#a78bfa", width=2.5),
+                    line=dict(color=_tp["colorway"][4], width=2.5),
                 ))
-                fig_train.update_layout(**_dark_layout("PPO Training Reward Convergence", 320))
+                fig_train.update_layout(**_get_layout("PPO Training Reward Convergence", 320, theme))
                 fig_train.update_layout(
                     xaxis=dict(title="Rollout"),
                     yaxis=dict(title="Mean Episode Reward (last 10 eps)"),
@@ -405,14 +403,14 @@ def render_training_tab(ppo_history: dict | None = None):
                     fig_loss.add_trace(go.Scatter(
                         x=df_log["rollout"], y=df_log["policy_loss"],
                         mode="lines", name="Policy Loss",
-                        line=dict(color="#f87171", width=1.5),
+                        line=dict(color=_tp["danger"], width=1.5),
                     ))
                     fig_loss.add_trace(go.Scatter(
                         x=df_log["rollout"], y=df_log["value_loss"],
                         mode="lines", name="Value Loss",
-                        line=dict(color="#38bdf8", width=1.5),
+                        line=dict(color=_tp["accent"], width=1.5),
                     ))
-                    fig_loss.update_layout(**_dark_layout("Training Loss Curves", 260))
+                    fig_loss.update_layout(**_get_layout("Training Loss Curves", 260, theme))
                     fig_loss.update_layout(
                         xaxis=dict(title="Rollout"),
                         yaxis=dict(title="Loss"),
@@ -442,17 +440,18 @@ def render_training_tab(ppo_history: dict | None = None):
         rolling_mock = pd.Series(mock_rewards).rolling(15, min_periods=1).mean().tolist()
 
         fig_mock = go.Figure()
+        _mp = get_palette(theme)
         fig_mock.add_trace(go.Scatter(
             x=episodes, y=mock_rewards,
             mode="lines", name="Raw Episode Reward",
-            line=dict(color="#64748b", width=1), opacity=0.45,
+            line=dict(color=_mp["text_secondary"], width=1), opacity=0.45,
         ))
         fig_mock.add_trace(go.Scatter(
             x=episodes, y=rolling_mock,
             mode="lines", name="Smoothed Convergence",
-            line=dict(color="#a78bfa", width=2.5),
+            line=dict(color=_mp["colorway"][4], width=2.5),
         ))
-        fig_mock.update_layout(**_dark_layout("Mockup: PPO Reward Convergence", 300))
+        fig_mock.update_layout(**_get_layout("Mockup: PPO Reward Convergence", 300, theme))
         fig_mock.update_layout(
             xaxis=dict(title="Episode"),
             yaxis=dict(title="Cumulative Reward"),
@@ -469,17 +468,18 @@ def render_training_tab(ppo_history: dict | None = None):
         rm     = pd.Series(real_ep_rew).rolling(w_rm, min_periods=1).mean()
 
         fig_real = go.Figure()
+        _rp = get_palette(theme)
         fig_real.add_trace(go.Scatter(
             x=x_real, y=real_ep_rew,
             mode="lines", name="Checkpoint Episode Reward",
-            line=dict(color="#38bdf8", width=0.8), opacity=0.4,
+            line=dict(color=_rp["accent"], width=0.8), opacity=0.4,
         ))
         fig_real.add_trace(go.Scatter(
             x=x_real, y=rm.tolist(),
             mode="lines", name=f"Rolling Mean ({w_rm} ep)",
-            line=dict(color="#f59e0b", width=2.0),
+            line=dict(color=_rp["warning"], width=2.0),
         ))
-        fig_real.update_layout(**_dark_layout("Trained PPO Checkpoint Progress", 260))
+        fig_real.update_layout(**_get_layout("Trained PPO Checkpoint Progress", 260, theme))
         fig_real.update_layout(
             xaxis=dict(title="Episode"),
             yaxis=dict(title="Total Reward"),
@@ -535,6 +535,10 @@ def load_all():
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    # ── session state: theme ──────────────────────────────────────────────────
+    if "theme" not in st.session_state:
+        st.session_state["theme"] = "dark"
+
     cfg, device, lstm_model, scaler, ppo_policy, ppo_history, df_full, X_te, y_te = load_all()
 
     W       = cfg["preprocessing"]["window_size"]
@@ -579,6 +583,15 @@ def main():
         st.markdown(f"LSTM: {lstm_badge}", unsafe_allow_html=True)
         st.markdown(f"PPO:  {ppo_badge}",  unsafe_allow_html=True)
 
+        st.markdown("---")
+        # ── Dark / Light mode toggle ──────────────────────────────────────────
+        theme_toggle = st.toggle(
+            "🌙 Dark mode",
+            value=(st.session_state["theme"] == "dark"),
+            key="theme_toggle",
+        )
+        st.session_state["theme"] = "dark" if theme_toggle else "light"
+        theme = st.session_state["theme"]
 
         st.markdown("---")
         st.caption(
@@ -586,12 +599,94 @@ def main():
             "Data → LSTM → RL Env → PPO → SHAP → FastAPI"
         )
 
-    # ── header ────────────────────────────────────────────────────────────────
-    st.markdown("# 🚀 K8s RL Autoscaling Dashboard")
-    st.markdown(
-        "Intelligent Kubernetes pod autoscaling using **LSTM MC-Dropout forecasting** "
-        "and **PPO reinforcement learning**."
+    # Re-read theme after sidebar (toggle may have changed it)
+    theme = st.session_state["theme"]
+
+    # ── Inject theme CSS ──────────────────────────────────────────────────────
+    inject_css(theme)
+
+    # ── Render header banner ──────────────────────────────────────────────────
+    api_status = st.session_state.get("api_status", "unknown")
+    render_header(api_status=api_status, theme=theme)
+
+    # ── Pod Scaling Activity section (above tabs) ─────────────────────────────
+    render_section_header("🖥️ Pod Scaling Activity", "Live view of pods being added and removed")
+
+    _min_r   = cfg["rl_env"]["min_replicas"]
+    _max_r   = cfg["rl_env"]["max_replicas"]
+    _slo_thr = cfg["rl_env"]["slo_threshold"]
+    _init_r  = cfg["rl_env"]["initial_replicas"]
+    _lag     = cfg["rl_env"]["scale_lag_steps"]
+
+    _rl_ep_main = st.session_state.get("rl_episode", None)
+    _is_sim = True
+
+    if _rl_ep_main is not None and len(_rl_ep_main.get("replicas", [])) > 0:
+        _is_sim = False
+        _rl_replicas = np.array(_rl_ep_main["replicas"][:300])
+        _n = len(_rl_replicas)
+        _cpu_w = np.array(_rl_ep_main["cpu_per_pod"][:_n]) * _rl_replicas
+        _hpa_replicas = simulate_hpa_replicas(_cpu_w, _min_r, _max_r, _slo_thr, _init_r, lag=_lag)
+        _cpu_series = _cpu_w
+    else:
+        _cpu_series = df_full["cpu_util"].iloc[:200].to_numpy()
+        _hpa_replicas = simulate_hpa_replicas(_cpu_series, _min_r, _max_r, _slo_thr, _init_r, lag=_lag)
+        _rl_replicas  = simulate_predictive_rl_replicas(_cpu_series, _min_r, _max_r, _slo_thr, _init_r)
+
+    _diffs = np.diff(_rl_replicas, prepend=_rl_replicas[0])
+    _up_count   = int(np.sum(_diffs > 0))
+    _down_count = int(np.sum(_diffs < 0))
+    _rl_cur  = int(_rl_replicas[-1])
+    _hpa_cur = int(_hpa_replicas[-1])
+    _avg_rl  = float(np.mean(_rl_replicas))
+    _avg_hpa = float(np.mean(_hpa_replicas))
+    _cost_savings = max(0.0, (_avg_hpa - _avg_rl) / max(_avg_hpa, 1e-3) * 100)
+
+    render_metric_row([
+        {"label": "Current Replicas (RL)",   "value": str(_rl_cur),           "icon": "🤖", "delta": f"avg {_avg_rl:.1f}"},
+        {"label": "Current Replicas (HPA)",  "value": str(_hpa_cur),          "icon": "⚙️", "delta": f"avg {_avg_hpa:.1f}"},
+        {"label": "Total Scale-Ups",          "value": str(_up_count),         "icon": "⬆️", "status": "ok"},
+        {"label": "Total Scale-Downs",        "value": str(_down_count),       "icon": "⬇️", "status": "warn"},
+        {"label": "Avg Replicas (RL)",        "value": f"{_avg_rl:.2f}",       "icon": "📊"},
+        {"label": "Est. Cost Savings vs HPA", "value": f"{_cost_savings:.1f}%","icon": "💰", "status": "ok"},
+    ], theme=theme)
+
+    if _is_sim:
+        render_simulated_badge()
+
+    _prev_rl  = int(_rl_replicas[-2]) if len(_rl_replicas) > 1 else _rl_cur
+    _prev_hpa = int(_hpa_replicas[-2]) if len(_hpa_replicas) > 1 else _hpa_cur
+    render_pod_grid(_rl_cur, _prev_rl, _hpa_cur, _prev_hpa, theme=theme)
+
+    _fig_main = make_scaling_activity_figure(
+        _hpa_replicas, _rl_replicas, _cpu_series,
+        mean_fc=None, lower_fc=None, upper_fc=None,
+        slo_threshold=_slo_thr,
+        is_simulated=_is_sim,
+        theme=theme,
     )
+    st.plotly_chart(_fig_main, use_container_width=True, key="fig_main_activity")
+
+    render_how_to_read(
+        "**Panel A (top):** Step-line replica counts for HPA (dashed red) vs RL Agent (solid blue, filled). "
+        "▲ = scale-up event, ▼ = scale-down event. Green shaded bands highlight steps where RL scaled "
+        "proactively before HPA reacted.\n\n"
+        "**Panel B (middle):** CPU utilisation trace with SLO threshold (dashed red line). "
+        "If forecast data is available, the MC-Dropout CI band is also shown.\n\n"
+        "**Panel C (bottom):** Diverging bar chart — green bars = pods added, red bars = pods removed per step."
+    )
+
+    _events = []
+    for _i in np.where(np.abs(_diffs) > 0)[0][-5:][::-1]:
+        _act = "UP" if _diffs[_i] > 0 else "DOWN"
+        _events.append({
+            "timestamp": f"t={_i}",
+            "action":    _act,
+            "from_r":    int(_rl_replicas[_i] - _diffs[_i]),
+            "to_r":      int(_rl_replicas[_i]),
+            "reason":    "Forecast spike" if _act == "UP" else "Load normalized",
+        })
+    render_event_feed(_events, theme=theme)
 
     # ── tabs ──────────────────────────────────────────────────────────────────
     tab_forecast, tab_scaling, tab_training, tab_rl, tab_shap, tab_api = st.tabs([
@@ -676,70 +771,26 @@ def main():
             end   = cur_pos + W
             start = max(0, end - W * 4)
             sub   = df_full.iloc[start:end]
-            fig_tr = go.Figure()
-            fig_tr.add_trace(go.Scatter(
-                x=sub.index, y=sub["cpu_util"],
-                mode="lines", name="CPU Util",
-                line=dict(color="#38bdf8", width=1.5),
-                fill="tozeroy", fillcolor="rgba(56,189,248,0.08)",
-            ))
-            if len(sub) > 0:
-                fig_tr.add_vline(
-                    x=sub.index[-1], line_width=1.5,
-                    line_dash="dash", line_color="#f59e0b",
-                    annotation_text="now", annotation_position="top right",
-                )
-            fig_tr.update_layout(**_dark_layout("Workload Trace (replaying)", 280))
-            fig_tr.update_layout(yaxis=dict(range=[0, 1.05], title="CPU Utilisation"))
+            fig_tr = make_workload_trace_figure(sub, sub.index[-1] if len(sub) > 0 else 0, theme=theme)
             st.plotly_chart(fig_tr, use_container_width=True, key=f"trace_{step}")
-            st.caption("*Solid blue = historical CPU utilisation (normalised 0.0–1.0), dashed amber line = current replay timestamp.*")
+            render_how_to_read("Solid line = historical CPU utilisation (normalised 0.0–1.0). Dashed amber line = current replay timestamp.")
 
         with col_right:
-            x = list(range(1, H + 1))
-            fig_fc = go.Figure()
-            fig_fc.add_trace(go.Scatter(
-                x=x + x[::-1],
-                y=list(upper_fc) + list(lower_fc[::-1]),
-                fill="toself", fillcolor="rgba(245,158,11,0.18)",
-                line=dict(color="rgba(0,0,0,0)"),
-                name=f"CI band ({ci_lower}–{ci_upper}th)", hoverinfo="skip",
-            ))
-            fig_fc.add_trace(go.Scatter(
-                x=x, y=list(actual_orig),
-                mode="lines+markers", name="Actual",
-                line=dict(color="#38bdf8", width=2), marker=dict(size=5),
-            ))
-            fig_fc.add_trace(go.Scatter(
-                x=x, y=list(mean_fc),
-                mode="lines+markers", name="Forecast (mean)",
-                line=dict(color="#f59e0b", width=2, dash="dot"),
-                marker=dict(size=5, symbol="diamond"),
-            ))
-            fig_fc.update_layout(**_dark_layout(f"MC Dropout Forecast — next {H} steps", 340))
-            fig_fc.update_layout(
-                xaxis=dict(title="Horizon step"),
-                yaxis=dict(title="CPU Utilisation"),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            fig_fc = make_forecast_figure(
+                actual_orig, mean_fc, lower_fc, upper_fc,
+                H, ci_lower, ci_upper, theme=theme,
             )
             st.plotly_chart(fig_fc, use_container_width=True, key=f"fc_{step}")
-            st.caption(f"*Solid blue = ground-truth actual CPU, dotted orange = mean MC-Dropout forecast, shaded band = {ci_lower}th–{ci_upper}th percentile prediction interval.*")
+            render_how_to_read(
+                f"Solid blue = ground-truth actual CPU. Dotted orange = mean MC-Dropout forecast. "
+                f"Shaded band = {ci_lower}th–{ci_upper}th percentile prediction interval."
+            )
 
         # rolling MAE
         if len(st.session_state.mae_acc) > 1:
-            fig_mae = go.Figure()
-            mae_s = pd.Series(st.session_state.mae_acc)
-            fig_mae.add_trace(go.Scatter(
-                y=mae_s.rolling(20, min_periods=1).mean().tolist(),
-                mode="lines", name="MAE (rolling-20)",
-                line=dict(color="#a78bfa", width=1.5),
-            ))
-            fig_mae.update_layout(**_dark_layout("Rolling MAE over Replay", 200))
-            fig_mae.update_layout(
-                xaxis=dict(title="Replay step"),
-                yaxis=dict(title="MAE"),
-            )
+            fig_mae = make_rolling_mae_figure(st.session_state.mae_acc, theme=theme)
             st.plotly_chart(fig_mae, use_container_width=True, key=f"mae_{step}")
-            st.caption("*Purple line = 20-step rolling Mean Absolute Error (MAE) between forecast mean and actuals.*")
+            render_how_to_read("20-step rolling Mean Absolute Error (MAE) between forecast mean and actuals. Lower is better.")
 
         if st.session_state.lstm_running:
             st.session_state.lstm_step += 1
@@ -751,13 +802,13 @@ def main():
     # ════════════════════════════════════════════════════════════════════════════
     with tab_scaling:
         rl_ep_data = st.session_state.get("rl_episode", None)
-        render_scaling_decisions_tab(cfg, df_full, rl_ep=rl_ep_data)
+        render_scaling_decisions_tab(cfg, df_full, rl_ep=rl_ep_data, theme=theme)
 
     # ════════════════════════════════════════════════════════════════════════════
     # TAB 3: Training (Mockup & Telemetry)
     # ════════════════════════════════════════════════════════════════════════════
     with tab_training:
-        render_training_tab(ppo_history=ppo_history)
+        render_training_tab(ppo_history=ppo_history, theme=theme)
 
     # ════════════════════════════════════════════════════════════════════════════
     # TAB 4: RL Episode Replay
@@ -842,118 +893,38 @@ def main():
 
                 # Replica trace
                 with col_a:
-                    fig_rep = go.Figure()
-                    fig_rep.add_trace(go.Scatter(
-                        x=steps[::ds], y=np.array(ep["replicas"])[::ds],
-                        mode="lines", name="Replicas",
-                        line=dict(color="#58a6ff", width=1.5),
-                        fill="tozeroy", fillcolor="rgba(88,166,255,0.08)",
-                    ))
-                    if replay_s > 0:
-                        fig_rep.add_vline(
-                            x=replay_s, line_dash="dash",
-                            line_color="#f59e0b", line_width=1.5,
-                        )
-                    fig_rep.update_layout(**_dark_layout("Replica Count over Episode", 280))
-                    fig_rep.update_layout(yaxis=dict(title="Replicas"))
+                    fig_rep = make_replica_trace_figure(ep["replicas"], replay_s, theme=theme)
                     st.plotly_chart(fig_rep, use_container_width=True, key=f"rep_{replay_s}")
-                    st.caption("*Solid blue line = pod replica count over episode, dashed orange line = current replay position.*")
+                    render_how_to_read("Solid line = pod replica count over episode. Dashed amber line = current replay position.")
 
                 # CPU-per-pod trace + SLO line
                 with col_b:
-                    fig_cpp = go.Figure()
                     cpp_arr = np.array(ep["cpu_per_pod"])
-                    fig_cpp.add_trace(go.Scatter(
-                        x=steps[::ds], y=cpp_arr[::ds],
-                        mode="lines", name="CPU / Pod",
-                        line=dict(color="#3fb950", width=1.2),
-                    ))
-                    fig_cpp.add_hline(
-                        y=SLO_THR, line_dash="dash",
-                        line_color="#f78166", line_width=1.5,
-                        annotation_text=f"SLO={SLO_THR}",
-                        annotation_position="top right",
-                    )
-                    if replay_s > 0:
-                        fig_cpp.add_vline(
-                            x=replay_s, line_dash="dash",
-                            line_color="#f59e0b", line_width=1.5,
-                        )
-                    fig_cpp.update_layout(**_dark_layout("CPU-per-Pod (SLO threshold)", 280))
-                    fig_cpp.update_layout(
-                        yaxis=dict(title="CPU / Pod",
-                                   range=[0, max(1.2, cpp_arr.max() * 1.1)])
-                    )
+                    fig_cpp = make_cpu_per_pod_figure(cpp_arr, SLO_THR, replay_s, theme=theme)
                     st.plotly_chart(fig_cpp, use_container_width=True, key=f"cpp_{replay_s}")
-                    st.caption(f"*Solid green line = observed CPU per pod, dashed red line = target SLO limit ({SLO_THR}).*")
+                    render_how_to_read(f"CPU per pod over episode. Dashed red line = SLO threshold ({SLO_THR}). Dashed amber = replay position.")
 
                 # Action distribution + Reward curve
                 col_c, col_d = st.columns(2)
 
                 with col_c:
-                    action_labels = ["-2", "-1", "0", "+1", "+2"]
-                    counts = np.bincount(ep["actions"], minlength=5)
-                    pcts   = counts / max(counts.sum(), 1) * 100
-                    fig_act = go.Figure(go.Bar(
-                        x=action_labels, y=pcts,
-                        marker_color=["#f78166","#ffa657","#58a6ff","#3fb950","#bc8cff"],
-                        text=[f"{p:.0f}%" for p in pcts],
-                        textposition="outside",
-                    ))
-                    fig_act.update_layout(**_dark_layout("Action Distribution", 280))
-                    fig_act.update_layout(
-                        xaxis=dict(title="Δ Replicas"),
-                        yaxis=dict(title="Usage (%)"),
-                    )
+                    fig_act = make_action_distribution_figure(ep["actions"], theme=theme)
                     st.plotly_chart(fig_act, use_container_width=True, key="actions_dist")
-                    st.caption("*Colored bars = distribution of scaling actions chosen by policy (Δ replicas: -2, -1, 0, +1, +2).*")
+                    render_how_to_read("Distribution of scaling actions chosen by the PPO policy (Δ replicas: -2, -1, 0, +1, +2).")
 
                 with col_d:
-                    # Cumulative reward
-                    cum_rew = np.cumsum(ep["rewards"])
-                    fig_cr  = go.Figure()
-                    fig_cr.add_trace(go.Scatter(
-                        x=steps[::ds], y=cum_rew[::ds],
-                        mode="lines", name="Cumulative Reward",
-                        line=dict(color="#ffa657", width=1.5),
-                        fill="tozeroy", fillcolor="rgba(255,166,87,0.08)",
-                    ))
-                    if replay_s > 0:
-                        fig_cr.add_vline(
-                            x=replay_s, line_dash="dash",
-                            line_color="#f59e0b", line_width=1.5,
-                        )
-                    fig_cr.update_layout(**_dark_layout("Cumulative Reward", 280))
-                    fig_cr.update_layout(yaxis=dict(title="Cumulative Reward"))
+                    fig_cr = make_cumulative_reward_figure(ep["rewards"], replay_s, theme=theme)
                     st.plotly_chart(fig_cr, use_container_width=True, key=f"cumrew_{replay_s}")
-                    st.caption("*Amber line = cumulative episode reward combining SLO rewards, replica costs, and stability penalties.*")
+                    render_how_to_read("Cumulative episode reward combining SLO rewards, replica costs, and stability penalties.")
 
                 # Training reward history (if available from checkpoint)
                 if ppo_history and ppo_history.get("episode_rewards"):
                     st.markdown("#### Training History")
                     ep_rew = ppo_history["episode_rewards"]
-                    x_ep   = np.arange(1, len(ep_rew) + 1)
                     w_rm   = min(20, max(1, len(ep_rew) // 5))
-                    rm     = pd.Series(ep_rew).rolling(w_rm, min_periods=1).mean()
-                    fig_hist = go.Figure()
-                    fig_hist.add_trace(go.Scatter(
-                        x=x_ep, y=ep_rew,
-                        mode="lines", name="Episode reward",
-                        line=dict(color="#58a6ff", width=0.8), opacity=0.4,
-                    ))
-                    fig_hist.add_trace(go.Scatter(
-                        x=x_ep, y=rm.tolist(),
-                        mode="lines", name=f"Rolling mean ({w_rm} ep)",
-                        line=dict(color="#ffa657", width=2.0),
-                    ))
-                    fig_hist.update_layout(**_dark_layout("PPO Training Reward Curve", 250))
-                    fig_hist.update_layout(
-                        xaxis=dict(title="Episode"),
-                        yaxis=dict(title="Total Reward"),
-                        legend=dict(orientation="h", y=1.05),
-                    )
+                    fig_hist = make_training_history_figure(ep_rew, w_rm, theme=theme)
                     st.plotly_chart(fig_hist, use_container_width=True, key="train_hist")
-                    st.caption("*Blue line = training episode reward, orange line = rolling mean reward.*")
+                    render_how_to_read("Blue line = training episode reward, orange line = rolling mean reward.")
 
                 # Advance replay
                 if st.session_state.rl_running and replay_s < n_ep_steps - 1:
@@ -1068,8 +1039,10 @@ python -m explainability.shap_explain --no-lstm   # PPO only (faster)
                         resp = httpx.get(f"{API_URL}/health", timeout=3.0)
                         api_data   = resp.json()
                         api_online = True
+                        st.session_state["api_status"] = "healthy"
                     except Exception as exc:
                         st.error(f"Could not reach API: {exc}")
+                        st.session_state["api_status"] = "offline"
 
         with col_ep:
             if st.button("▶ POST /run-episode", key="api_run_ep"):
@@ -1160,6 +1133,9 @@ curl -X POST http://localhost:8000/scale-action \\
   -d '{"cpu_window":[0.5,...], "replicas_norm":0.3, "cpu_per_pod_norm":0.6}'
 ```
 """)
+
+    # ── Footer ────────────────────────────────────────────────────────────────
+    render_footer(version="v10.0", theme=theme)
 
 
 if __name__ == "__main__":

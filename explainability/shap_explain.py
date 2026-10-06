@@ -41,21 +41,25 @@ import matplotlib.pyplot as plt
 import torch
 import yaml
 
-# ── SHAP import guard ─────────────────────────────────────�def explain_lstm(
+# ── SHAP import guard ─────────────────────────────────────────────────────────
+try:
+    import shap
+    _SHAP_OK = True
+except ImportError:
+    _SHAP_OK = False
+
+
+def explain_lstm(
     model,
     scaler,
     X_te:       np.ndarray,          # (N, window, 1)
     cfg:        dict,
     output_dir: Path,
-    n_bg:       int = 30,            # background samples for GradientExplainer
+    n_bg:       int = 30,            # background samples for KernelExplainer
     n_explain:  int = 60,            # samples to explain
     device:     torch.device = torch.device("cpu"),
 ) -> Path:
-    """Run GradientExplainer on the LSTM forecaster and save a summary plot.
-
-    Uses shap.GradientExplainer (gradient-based, ~1000x faster than KernelSHAP
-    on CPU) to attribute each look-back timestep's contribution to the mean
-    forecast output.
+    """Run KernelSHAP on the LSTM forecaster and save a summary plot.
 
     Parameters
     ----------
@@ -64,7 +68,7 @@ import yaml
     X_te       : test windows, shape (N, window, 1).
     cfg        : full config dict.
     output_dir : directory for the output PNG.
-    n_bg       : background samples for GradientExplainer baseline.
+    n_bg       : background samples for KernelExplainer.
     n_explain  : number of test samples to explain.
     device     : torch device.
 
@@ -80,53 +84,19 @@ import yaml
     W = cfg["preprocessing"]["window_size"]
     H = cfg["preprocessing"]["horizon"]
 
-    # GradientExplainer requires the model to be in train-compatible mode
-    # (it uses autograd), but we disable MC dropout for stable gradients.
     model.eval()
-    # Freeze dropout so gradients are deterministic
-    for m in model.modules():
-        if isinstance(m, torch.nn.Dropout):
-            m.p = 0.0
 
-    # ── Wrapper: scalar output (mean of horizon forecast) ─────────────────────
-    class _LSTMWrapper(torch.nn.Module):
-        """Wrap LSTMForecast: (B, W, 1) -> (B,) mean forecast."""
-        def __init__(self, base):
-            super().__init__()
-            self.base = base
-        def forward(self, x):
-            out = self.base(x)   # (B, H)
-            return out.mean(dim=1, keepdim=True)  # (B, 1)
+    # ── numpy callable: (B, W) -> (B,) mean forecast ──────────────────────────
+    def _predict(X_flat: np.ndarray) -> np.ndarray:
+        x_t = torch.from_numpy(X_flat.astype(np.float32)[:, :, np.newaxis]).to(device)
+        with torch.no_grad():
+            out = model(x_t)   # (B, H)
+        return out.mean(dim=1).cpu().numpy()
 
-    wrapped = _LSTMWrapper(model).to(device)
-    wrapped.eval()
-
-    # ── prepare data ─────────────────────────────────────────────────────────
-    X_raw = X_te[:, :, 0]   # (N, W)
-    rng   = np.random.default_rng(42)
-    bg_idx = rng.choice(len(X_raw), size=min(n_bg, len(X_raw)), replace=False)
-    ex_idx = rng.choice(len(X_raw), size=min(n_explain, len(X_raw)), replace=False)
-
-    # Tensors: shape (N, W, 1) — LSTM input format
-    X_bg_t = torch.from_numpy(
-        X_raw[bg_idx].astype(np.float32)[:, :, np.newaxis]
-    ).to(device)
-    X_ex_t = torch.from_numpy(
-        X_raw[ex_idx].astype(np.float32)[:, :, np.newaxis]
-    ).to(device)
-
-    print(f"  [SHAP/LSTM] GradientExplainer | bg={len(bg_idx)} explain={len(ex_idx)}", flush=True)
-
-    explainer   = shap.GradientExplainer(wrapped, X_bg_t)
-    shap_values = explainer.shap_values(X_ex_t)
-    # shap_values: list of 1 array of shape (n_explain, W, 1)
-    if isinstance(shap_values, list):
-        sv = shap_values[0]          # (n_explain, W, 1)
-    else:
-        sv = shap_values             # (n_explain, W, 1)
-    sv = sv[:, :, 0]                 # (n_explain, W) — drop last dim
-
-n(n_bg, len(X_flat)), replace=False)
+    # ── prepare data ──────────────────────────────────────────────────────────
+    X_flat = X_te[:, :, 0]   # (N, W)
+    rng    = np.random.default_rng(42)
+    bg_idx = rng.choice(len(X_flat), size=min(n_bg, len(X_flat)), replace=False)
     ex_idx = rng.choice(len(X_flat), size=min(n_explain, len(X_flat)), replace=False)
 
     X_bg = X_flat[bg_idx]              # (n_bg, W)
@@ -315,11 +285,21 @@ def explain_ppo(
     x_pos = np.arange(len(group_names))
     bar_w = 0.15
 
+    obs_dim = shap_arr.shape[-1]
+    # Clip group indices to valid obs_dim range
+    groups_clipped = {
+        k: [i for i in v if i < obs_dim]
+        for k, v in groups.items()
+    }
+
     for ai, (action_name, color) in enumerate(zip(ACTION_NAMES, COLORS)):
         sv_action = shap_arr[ai]  # (n_explain, obs_dim)
         group_means = []
-        for g_idx in groups.values():
-            group_means.append(np.abs(sv_action[:, g_idx]).mean())
+        for g_idx in groups_clipped.values():
+            if g_idx:
+                group_means.append(np.abs(sv_action[:, g_idx]).mean())
+            else:
+                group_means.append(0.0)
         ax2.bar(
             x_pos + ai * bar_w - bar_w * 2,
             group_means, bar_w,
