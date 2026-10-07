@@ -36,15 +36,20 @@ class CloudServiceUser(HttpUser):
     """Simulates realistic end-user requests hitting the Kubernetes microservice."""
     wait_time = between(0.1, 0.5)
 
-    @task(10)
+    @task(7)
+    def compute_work(self):
+        """CPU-intensive endpoint that drives realistic compute load."""
+        self.client.get("/work", name="GET /work (CPU Task)")
+
+    @task(3)
     def index(self):
         """Standard web request to the root service endpoint."""
         self.client.get("/", name="GET / (Landing)")
 
-    @task(3)
+    @task(1)
     def health_check(self):
         """Simulated health/status check."""
-        self.client.get("/", name="GET /health (Ping)")
+        self.client.get("/health", name="GET /health (Ping)")
 
 
 class AzureTraceLoadShape(LoadTestShape):

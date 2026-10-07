@@ -90,7 +90,12 @@ def main() -> None:
     # ── load trace ────────────────────────────────────────────────────────────
     from data.loader import load_trace
     df = load_trace(cfg=cfg)
+    train_frac = float(cfg["preprocessing"].get("train_frac", 0.8))
+    split_idx  = int(len(df) * train_frac)
+    train_df   = df.iloc[:split_idx].reset_index(drop=True)
     print(f"  Trace loaded       : {len(df):,} timesteps")
+    print(f"  Training split     : {len(train_df):,} timesteps ({100*train_frac:.0f}%)")
+    print(f"  Held-out eval split: {len(df) - len(train_df):,} timesteps ({100*(1-train_frac):.0f}%)")
 
     # ── env factory ───────────────────────────────────────────────────────────
     from rl_env.k8s_env import K8sAutoscalingEnv
@@ -101,7 +106,7 @@ def main() -> None:
             cfg=cfg,
             model=lstm_model,
             scaler=scaler,
-            trace_df=df,
+            trace_df=train_df,
             device=device,
         )
         # Optionally wrap with TransitionLogger to persist (s,a,r,s',done) data

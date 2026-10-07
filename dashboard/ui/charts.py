@@ -41,10 +41,15 @@ def _get_layout(
     dict
         Keyword arguments for ``fig.update_layout(**...)``.
     """
+    p = get_palette(theme)
     base = get_plotly_template(theme)
     base["title"] = title
     base["height"] = height
+    # Use surface color so charts look polished on the background
+    base["plot_bgcolor"] = p["surface"]
+    base["paper_bgcolor"] = p["surface"]
     return base
+
 
 
 # ── Composite scaling activity figure ────────────────────────────────────────
@@ -258,15 +263,15 @@ def make_scaling_activity_figure(
     # ── Global layout ─────────────────────────────────────────────────────────
     tpl = get_plotly_template(theme)
     fig.update_layout(
-        plot_bgcolor=tpl["plot_bgcolor"],
-        paper_bgcolor=tpl["paper_bgcolor"],
+        plot_bgcolor=p["surface"],
+        paper_bgcolor=p["surface"],
         font=tpl["font"],
-        height=600,
-        margin=dict(l=55, r=20, t=55, b=45),
+        height=640,
+        margin=dict(l=55, r=20, t=60, b=45),
         legend=dict(
             bgcolor="rgba(0,0,0,0)",
-            bordercolor=p["border"],
-            font=dict(color=p["text_secondary"]),
+            bordercolor="rgba(0,0,0,0)",
+            font=dict(color=p["text_secondary"], size=11),
             orientation="h",
             y=1.04, x=0, xanchor="left",
         ),
@@ -282,6 +287,7 @@ def make_scaling_activity_figure(
     for ann in fig.layout.annotations:
         ann.font.color = p["text_secondary"]
         ann.font.size = 11
+        ann.font.family = "Inter, system-ui, sans-serif"
 
     return fig
 
@@ -311,9 +317,9 @@ def make_workload_trace_figure(
         x=df_sub.index, y=df_sub["cpu_util"],
         mode="lines",
         name="CPU Util",
-        line=dict(color=p["accent"], width=1.5),
+        line=dict(color=p["accent"], width=1.8),
         fill="tozeroy",
-        fillcolor=f"rgba({_hex_to_rgb(p['accent'])},0.08)",
+        fillcolor=f"rgba({_hex_to_rgb(p['accent'])},0.10)",
     ))
     if len(df_sub) > 0:
         fig.add_vline(

@@ -90,22 +90,29 @@ if HIDE_STREAMLIT_UI:
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def kpi(label: str, value: str, sub: str = "") -> str:
-    """Legacy KPI card helper — preserved for backward compatibility.
-    New code should use metric_card() from dashboard.ui.components.
-    """
-    return (
-        f'<div class="kpi-card">'
-        f'<div class="kpi-label">{label}</div>'
-        f'<div class="kpi-value">{value}</div>'
-        f'<div class="kpi-sub">{sub}</div>'
-        f'</div>'
-    )
+def kpi(label: str, value: str, sub: str = "", icon: str = "", status: str = "neutral", theme: str | None = None) -> str:
+    """KPI card helper using modern glassmorphism metric_card."""
+    t = theme or st.session_state.get("theme", "dark")
+    return metric_card(label=label, value=value, delta=sub, icon=icon, status=status, theme=t)
 
 
 def badge(text: str, level: str = "ok") -> str:
     """Legacy badge helper — delegates to ui.components.badge."""
     return _badge_ui(text, level)
+
+
+@st.cache_data(ttl=2.0)
+def check_api_status(api_url: str = "http://127.0.0.1:8000/health", timeout: float = 0.5) -> str:
+    """Check health of the FastAPI REST backend service (Phase 9)."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(api_url, headers={"User-Agent": "StreamlitDashboard"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status == 200:
+                return "healthy"
+            return "offline"
+    except Exception:
+        return "offline"
 
 # ── CALIBRATION FIX HELPERS ───────────────────────────────────────────────────
 # Explanation for B.Tech project review:
@@ -404,19 +411,7 @@ def render_training_tab(ppo_history: dict | None = None, theme: str = "dark"):
                 st.warning("training_log.csv exists but is empty. Run `python -m rl_agent.train_rl` first.")
             else:
                 # Plot reward curve using themed chart builder
-                _tp = get_palette(theme)
-                fig_train = go.Figure()
-                fig_train.add_trace(go.Scatter(
-                    x=df_log["rollout"], y=df_log["mean_reward"],
-                    mode="lines", name="Mean Reward (rolling-10 episodes)",
-                    line=dict(color=_tp["colorway"][4], width=2.5),
-                ))
-                fig_train.update_layout(**_get_layout("PPO Training Reward Convergence", 320, theme))
-                fig_train.update_layout(
-                    xaxis=dict(title="Rollout"),
-                    yaxis=dict(title="Mean Episode Reward (last 10 eps)"),
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                )
+                fig_train = make_training_reward_figure(df_log, theme=theme)
                 st.plotly_chart(fig_train, use_container_width=True, key="fig_train_real")
                 st.caption(
                     f"*Logged {len(df_log)} rollouts from live PPO training. "
@@ -424,36 +419,18 @@ def render_training_tab(ppo_history: dict | None = None, theme: str = "dark"):
                 )
                 
                 # Summary metrics table
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    final_reward = df_log["mean_reward"].iloc[-1]
-                    st.markdown(kpi("FINAL MEAN REWARD", f"{final_reward:+.1f}", "last 10 episodes"), unsafe_allow_html=True)
-                with col2:
-                    final_slo = df_log["slo_pct"].iloc[-1]
-                    st.markdown(kpi("FINAL SLO %", f"{final_slo:.1f}%", "last 10 episodes"), unsafe_allow_html=True)
-                with col3:
-                    final_reps = df_log["avg_replicas"].iloc[-1]
-                    st.markdown(kpi("AVG REPLICAS", f"{final_reps:.2f}", "last 10 episodes"), unsafe_allow_html=True)
+                final_reward = float(df_log["mean_reward"].iloc[-1])
+                final_slo = float(df_log["slo_pct"].iloc[-1])
+                final_reps = float(df_log["avg_replicas"].iloc[-1])
+                render_metric_row([
+                    {"label": "FINAL MEAN REWARD", "value": f"{final_reward:+.1f}", "icon": "🏆", "delta": "last 10 episodes", "status": "ok" if final_reward > 0 else "warn"},
+                    {"label": "FINAL SLO %", "value": f"{final_slo:.1f}%", "icon": "🎯", "delta": "last 10 episodes", "status": "ok" if final_slo >= 90.0 else "err"},
+                    {"label": "AVG REPLICAS", "value": f"{final_reps:.2f}", "icon": "🤖", "delta": "last 10 episodes"},
+                ], theme=theme)
                 
                 # Optional: loss curves
                 with st.expander("📉 Loss Curves (Policy & Value)"):
-                    fig_loss = go.Figure()
-                    fig_loss.add_trace(go.Scatter(
-                        x=df_log["rollout"], y=df_log["policy_loss"],
-                        mode="lines", name="Policy Loss",
-                        line=dict(color=_tp["danger"], width=1.5),
-                    ))
-                    fig_loss.add_trace(go.Scatter(
-                        x=df_log["rollout"], y=df_log["value_loss"],
-                        mode="lines", name="Value Loss",
-                        line=dict(color=_tp["accent"], width=1.5),
-                    ))
-                    fig_loss.update_layout(**_get_layout("Training Loss Curves", 260, theme))
-                    fig_loss.update_layout(
-                        xaxis=dict(title="Rollout"),
-                        yaxis=dict(title="Loss"),
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                    )
+                    fig_loss = make_loss_curves_figure(df_log, theme=theme)
                     st.plotly_chart(fig_loss, use_container_width=True, key="fig_loss_curves")
                     
         except Exception as e:
@@ -501,28 +478,8 @@ def render_training_tab(ppo_history: dict | None = None, theme: str = "dark"):
     if ppo_history and ppo_history.get("episode_rewards"):
         st.markdown("#### Historical PPO Training Telemetry (From Checkpoint)")
         real_ep_rew = ppo_history["episode_rewards"]
-        x_real = np.arange(1, len(real_ep_rew) + 1)
         w_rm   = min(20, max(1, len(real_ep_rew) // 5))
-        rm     = pd.Series(real_ep_rew).rolling(w_rm, min_periods=1).mean()
-
-        fig_real = go.Figure()
-        _rp = get_palette(theme)
-        fig_real.add_trace(go.Scatter(
-            x=x_real, y=real_ep_rew,
-            mode="lines", name="Checkpoint Episode Reward",
-            line=dict(color=_rp["accent"], width=0.8), opacity=0.4,
-        ))
-        fig_real.add_trace(go.Scatter(
-            x=x_real, y=rm.tolist(),
-            mode="lines", name=f"Rolling Mean ({w_rm} ep)",
-            line=dict(color=_rp["warning"], width=2.0),
-        ))
-        fig_real.update_layout(**_get_layout("Trained PPO Checkpoint Progress", 260, theme))
-        fig_real.update_layout(
-            xaxis=dict(title="Episode"),
-            yaxis=dict(title="Total Reward"),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        )
+        fig_real = make_training_history_figure(real_ep_rew, w_rm, theme=theme)
         st.plotly_chart(fig_real, use_container_width=True, key="fig_real_train_hist")
         st.caption("*Blue line = raw checkpoint training episode reward, orange line = rolling mean.*")
 
@@ -791,11 +748,14 @@ def main():
         rolling_cov = float(pd.Series(st.session_state.cov_acc).rolling(20, min_periods=1).mean().iloc[-1])
 
         # KPI row with color-coded calibration card
-        k1, k2, k3, k4 = st.columns(4)
-        with k1: st.markdown(kpi("STEP", f"{step+1}/{n_test}"), unsafe_allow_html=True)
-        with k2: st.markdown(kpi("MAE", f"{mae:.4f}", "lower is better"), unsafe_allow_html=True)
-        with k3: st.markdown(kpi("RMSE", f"{rmse:.4f}", "lower is better"), unsafe_allow_html=True)
-        with k4: st.markdown(kpi_calibration(ci_cov, rolling_cov=rolling_cov, theme=theme), unsafe_allow_html=True)
+        cov_status = "err" if ci_cov < 60.0 else ("warn" if ci_cov < 85.0 else "ok")
+        cal_label = "Under-calibrated" if ci_cov < 60.0 else ("Moderately calibrated" if ci_cov < 85.0 else "Well calibrated")
+        render_metric_row([
+            {"label": "STEP", "value": f"{step+1} / {n_test}", "icon": "⏱️", "delta": f"Horizon H={H}"},
+            {"label": "MAE", "value": f"{mae:.4f}", "icon": "📉", "delta": "lower is better", "status": "ok" if mae < 0.08 else "warn"},
+            {"label": "RMSE", "value": f"{rmse:.4f}", "icon": "📊", "delta": "lower is better", "status": "ok" if rmse < 0.10 else "warn"},
+            {"label": "CI COVERAGE", "value": f"{ci_cov:.1f}%", "icon": "🎯", "delta": f"rolling: {rolling_cov:.1f}% · {cal_label}", "status": cov_status},
+        ], theme=theme)
 
         # charts
         train_frac = cfg["preprocessing"]["train_frac"]
@@ -918,11 +878,12 @@ def main():
                 replay_s   = min(st.session_state.rl_step, n_ep_steps - 1)
 
                 # KPI row
-                k1, k2, k3, k4 = st.columns(4)
-                with k1: st.markdown(kpi("TOTAL REWARD", f"{ep['total_reward']:+.0f}"), unsafe_allow_html=True)
-                with k2: st.markdown(kpi("SLO COMPLIANCE", f"{ep['slo_pct']:.1f}%", f"SLO threshold: {SLO_THR}"), unsafe_allow_html=True)
-                with k3: st.markdown(kpi("AVG REPLICAS", f"{ep['avg_replicas']:.2f}"), unsafe_allow_html=True)
-                with k4: st.markdown(kpi("EPISODE STEPS", f"{n_ep_steps:,}"), unsafe_allow_html=True)
+                render_metric_row([
+                    {"label": "TOTAL REWARD", "value": f"{ep['total_reward']:+.0f}", "icon": "🏆", "delta": "cumulative score", "status": "ok" if ep['total_reward'] > 0 else "warn"},
+                    {"label": "SLO COMPLIANCE", "value": f"{ep['slo_pct']:.1f}%", "icon": "🎯", "delta": f"SLO threshold: {SLO_THR}", "status": "ok" if ep['slo_pct'] >= 90.0 else "err"},
+                    {"label": "AVG REPLICAS", "value": f"{ep['avg_replicas']:.2f}", "icon": "🤖", "delta": "resource footprint"},
+                    {"label": "EPISODE STEPS", "value": f"{n_ep_steps:,}", "icon": "⚡", "delta": "total replay duration"},
+                ], theme=theme)
 
                 steps = np.arange(n_ep_steps)
                 ds    = max(1, n_ep_steps // 2000)   # downsample for large episodes
@@ -1131,10 +1092,11 @@ python -m explainability.shap_explain --no-lstm   # PPO only (faster)
             # If run-episode result
             if "total_reward" in api_data:
                 st.markdown("#### Episode Result (from /run-episode)")
-                m1, m2, m3 = st.columns(3)
-                with m1: st.markdown(kpi("TOTAL REWARD", f"{api_data['total_reward']:+.1f}"), unsafe_allow_html=True)
-                with m2: st.markdown(kpi("SLO %", f"{api_data['slo_pct']:.1f}%"), unsafe_allow_html=True)
-                with m3: st.markdown(kpi("AVG REPLICAS", f"{api_data['avg_replicas']:.2f}"), unsafe_allow_html=True)
+                render_metric_row([
+                    {"label": "TOTAL REWARD", "value": f"{api_data['total_reward']:+.1f}", "icon": "🏆", "status": "ok" if api_data['total_reward'] > 0 else "warn"},
+                    {"label": "SLO %", "value": f"{api_data['slo_pct']:.1f}%", "icon": "🎯", "status": "ok" if api_data['slo_pct'] >= 90.0 else "warn"},
+                    {"label": "AVG REPLICAS", "value": f"{api_data['avg_replicas']:.2f}", "icon": "🤖"},
+                ], theme=theme)
 
             st.json(api_data)
 

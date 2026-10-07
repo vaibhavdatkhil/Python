@@ -39,7 +39,7 @@ def generate_azure_trace(
     """
     rng = np.random.default_rng(seed)
     n_steps = int(pd.Timedelta(days=n_days) / pd.Timedelta(freq))
-    timestamps = pd.date_range("2026-01-01 00:00:00", periods=n_steps, freq=freq)
+    timestamps = pd.date_range("2026-01-05 00:00:00", periods=n_steps, freq=freq)
 
     t = np.arange(n_steps)
     steps_per_day = int(pd.Timedelta(days=1) / pd.Timedelta(freq))
@@ -53,8 +53,8 @@ def generate_azure_trace(
     biz_hours = np.exp(-0.5 * ((hour_frac - 0.45) / 0.12) ** 2) * 0.15 + \
                 np.exp(-0.5 * ((hour_frac - 0.65) / 0.12) ** 2) * 0.18
 
-    # 3. Weekly seasonality (weekdays higher, weekends lower)
-    day_of_week = (t // steps_per_day) % 7
+    # 3. Weekly seasonality (weekdays higher, weekends lower computed from real timestamp)
+    day_of_week = timestamps.dayofweek
     weekend_mask = (day_of_week >= 5).astype(float)
     weekly_factor = 1.0 - 0.35 * weekend_mask
 

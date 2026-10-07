@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 import matplotlib
 matplotlib.use("Agg")   # headless — no display needed
 import matplotlib.pyplot as plt
@@ -355,6 +356,14 @@ def main() -> None:
         "--device", default=None,
         help="Torch device. Auto-detected by default.",
     )
+    parser.add_argument(
+        "--benchmark", choices=["none", "azure", "alibaba", "all"], default="none",
+        help="Evaluate on real cloud benchmark traces (azure, alibaba, all).",
+    )
+    parser.add_argument(
+        "--eval-trace", default=None,
+        help="Path to a custom CSV trace file for evaluation.",
+    )
     args = parser.parse_args()
 
     project_root = Path(__file__).parent.parent
@@ -394,20 +403,71 @@ def main() -> None:
         lstm_model, scaler, _ = load_lstm(lstm_ckpt, device=device)
         print(f"  LSTM model : {lstm_ckpt.name}", flush=True)
 
-    # ── load trace + build envs ───────────────────────────────────────────────
+    # ── load PPO policy ───────────────────────────────────────────────────────
+    from rl_agent.ppo import load_ppo_checkpoint
+    policy, raw_ckpt = load_ppo_checkpoint(ckpt_path, device=device)
+    training_history = raw_ckpt.get("history", None)
+
+    slo_threshold = float(cfg["rl_env"]["slo_threshold"])
+    output_dir    = project_root / cfg["evaluation"]["output_dir"]
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _eval_and_report(trace_data: pd.DataFrame, label: str, plot_file: str):
+        from rl_env.k8s_env import K8sAutoscalingEnv
+
+        env_ppo = K8sAutoscalingEnv(
+            cfg=cfg, model=lstm_model, scaler=scaler,
+            trace_df=trace_data, device=device,
+        )
+        env_rand = K8sAutoscalingEnv(
+            cfg=cfg, model=None, scaler=None,
+            trace_df=trace_data, device=device,
+        )
+        env_hpa = K8sAutoscalingEnv(
+            cfg=cfg, model=None, scaler=None,
+            trace_df=trace_data, device=device,
+        )
+
+        print(f"\n  Running PPO episode on {label} ...", flush=True)
+        p_res = run_episode(env_ppo, policy=policy, seed=42)
+
+        print(f"  Running HPA-baseline episode on {label} ...", flush=True)
+        h_res = run_episode_hpa(env_hpa, cfg=cfg, seed=42)
+
+        print(f"  Running random-baseline episode on {label} ...", flush=True)
+        r_res = run_episode(env_rand, policy=None, seed=42)
+
+        print("", flush=True)
+        print(f"  Evaluation Comparison: {label}", flush=True)
+        print(f"  {'Metric':<28} {'PPO':>12} {'HPA':>12} {'Random':>12}", flush=True)
+        print(f"  {'-'*68}", flush=True)
+        print(f"  {'Total reward':<28} {p_res['total_reward']:>+12.1f} {h_res['total_reward']:>+12.1f} {r_res['total_reward']:>+12.1f}", flush=True)
+        print(f"  {'SLO compliance (%)':<28} {p_res['slo_pct']:>11.1f}% {h_res['slo_pct']:>11.1f}% {r_res['slo_pct']:>11.1f}%", flush=True)
+        print(f"  {'Avg replicas':<28} {p_res['avg_replicas']:>12.2f} {h_res['avg_replicas']:>12.2f} {r_res['avg_replicas']:>12.2f}", flush=True)
+        print(f"  {'Episode steps':<28} {len(p_res['rewards']):>12,} {len(h_res['rewards']):>12,} {len(r_res['rewards']):>12,}", flush=True)
+
+        d_hpa = p_res["slo_pct"] - h_res["slo_pct"]
+        s_hpa = "+" if d_hpa >= 0 else ""
+        d_rand = p_res["slo_pct"] - r_res["slo_pct"]
+        s_rand = "+" if d_rand >= 0 else ""
+        print(f"\n  SLO improvement vs HPA     : {s_hpa}{d_hpa:.1f}%", flush=True)
+        print(f"  SLO improvement vs random  : {s_rand}{d_rand:.1f}%", flush=True)
+
+        p_plot = output_dir / plot_file
+        make_evaluation_plot(
+            training_history=training_history if plot_file == "rl_evaluation.png" else None,
+            ppo_result=p_res,
+            random_result=r_res,
+            hpa_result=h_res,
+            slo_threshold=slo_threshold,
+            output_path=p_plot,
+        )
+        print(f"  Plot saved : {p_plot.resolve()}", flush=True)
+        return p_res, h_res, r_res
+
+    # ── 1. Evaluate on primary held-out trace split ───────────────────────────
     from data.loader import load_trace
-    from rl_env.k8s_env import K8sAutoscalingEnv
-
     df = load_trace(cfg=cfg)
-
-    # Use a held-out evaluation slice (last 20% of the trace) so the agent is
-    # evaluated on data it was NOT trained on.
-    #
-    # KNOWN LIMITATION: When the trace is synthetic or only a single CSV is
-    # available, training and evaluation are drawn from the same underlying
-    # distribution.  True out-of-distribution generalisation requires a
-    # separate real-world trace file.  The slice below at least prevents the
-    # agent from being evaluated on the exact timesteps it was trained on.
     train_frac = float(cfg["preprocessing"].get("train_frac", 0.8))
     split_idx  = int(len(df) * train_frac)
     eval_df    = df.iloc[split_idx:].reset_index(drop=True)
@@ -415,77 +475,33 @@ def main() -> None:
     print(f"  Trace (total)  : {len(df):,} timesteps", flush=True)
     print(f"  Eval slice     : [{split_idx:,} : {len(df):,}]  ({len(eval_df):,} steps, last {100*(1-train_frac):.0f}%)", flush=True)
 
-    env_ppo = K8sAutoscalingEnv(
-        cfg=cfg, model=lstm_model, scaler=scaler,
-        trace_df=eval_df, device=device,
-    )
-    env_rand = K8sAutoscalingEnv(
-        cfg=cfg, model=None, scaler=None,
-        trace_df=eval_df, device=device,
-    )
-    env_hpa = K8sAutoscalingEnv(
-        cfg=cfg, model=None, scaler=None,
-        trace_df=eval_df, device=device,
-    )
+    _eval_and_report(eval_df, "Held-out Evaluation Split", "rl_evaluation.png")
 
-    # ── load PPO policy ───────────────────────────────────────────────────────
-    from rl_agent.ppo import load_ppo_checkpoint
-    policy, raw_ckpt = load_ppo_checkpoint(ckpt_path, device=device)
+    # ── 2. Evaluate on benchmark traces if requested ──────────────────────────
+    benchmarks_to_run = []
+    if args.eval_trace:
+        benchmarks_to_run.append(("Custom Trace", Path(args.eval_trace), "rl_eval_custom.png"))
+    if args.benchmark in ("azure", "all"):
+        benchmarks_to_run.append(("Azure VM Trace", project_root / "data" / "azure_vm_workload_trace.csv", "rl_eval_azure.png"))
+    if args.benchmark in ("alibaba", "all"):
+        benchmarks_to_run.append(("Alibaba Cluster Trace", project_root / "data" / "alibaba_cluster_trace.csv", "rl_eval_alibaba.png"))
 
-    training_history = raw_ckpt.get("history", None)
-
-    # ── run episodes ──────────────────────────────────────────────────────────
-    print("\n  Running PPO episode ...", flush=True)
-    ppo_result = run_episode(env_ppo, policy=policy, seed=42)
-
-    print("  Running HPA-baseline episode ...", flush=True)
-    hpa_result = run_episode_hpa(env_hpa, cfg=cfg, seed=42)
-
-    print("  Running random-baseline episode ...", flush=True)
-    random_result = run_episode(env_rand, policy=None, seed=42)
-
-    slo_threshold = float(cfg["rl_env"]["slo_threshold"])
-
-    # ── print comparison table ────────────────────────────────────────────────
-    print("", flush=True)
-    print(f"  {'Metric':<28} {'PPO':>12} {'HPA':>12} {'Random':>12}", flush=True)
-    print(f"  {'-'*68}", flush=True)
-    print(f"  {'Total reward':<28} {ppo_result['total_reward']:>+12.1f} {hpa_result['total_reward']:>+12.1f} {random_result['total_reward']:>+12.1f}", flush=True)
-    print(f"  {'SLO compliance (%)':<28} {ppo_result['slo_pct']:>11.1f}% {hpa_result['slo_pct']:>11.1f}% {random_result['slo_pct']:>11.1f}%", flush=True)
-    print(f"  {'Avg replicas':<28} {ppo_result['avg_replicas']:>12.2f} {hpa_result['avg_replicas']:>12.2f} {random_result['avg_replicas']:>12.2f}", flush=True)
-    print(f"  {'Episode steps':<28} {len(ppo_result['rewards']):>12,} {len(hpa_result['rewards']):>12,} {len(random_result['rewards']):>12,}", flush=True)
-
-    delta_hpa = ppo_result["slo_pct"] - hpa_result["slo_pct"]
-    sign_hpa  = "+" if delta_hpa >= 0 else ""
-    delta_rand = ppo_result["slo_pct"] - random_result["slo_pct"]
-    sign_rand  = "+" if delta_rand >= 0 else ""
-    print(f"\n  SLO improvement vs HPA     : {sign_hpa}{delta_hpa:.1f}%", flush=True)
-    print(f"  SLO improvement vs random  : {sign_rand}{delta_rand:.1f}%", flush=True)
-
-    reward_delta_hpa = ppo_result["total_reward"] - hpa_result["total_reward"]
-    sign2_hpa = "+" if reward_delta_hpa >= 0 else ""
-    reward_delta_rand = ppo_result["total_reward"] - random_result["total_reward"]
-    sign2_rand = "+" if reward_delta_rand >= 0 else ""
-    print(f"  Reward improvement vs HPA   : {sign2_hpa}{reward_delta_hpa:.1f}", flush=True)
-    print(f"  Reward improvement vs random: {sign2_rand}{reward_delta_rand:.1f}", flush=True)
-
-    # ── generate plot ─────────────────────────────────────────────────────────
-    output_dir  = project_root / cfg["evaluation"]["output_dir"]
-    output_path = output_dir / "rl_evaluation.png"
-
-    make_evaluation_plot(
-        training_history=training_history,
-        ppo_result=ppo_result,
-        random_result=random_result,
-        hpa_result=hpa_result,
-        slo_threshold=slo_threshold,
-        output_path=output_path,
-    )
+    for label, path, plot_file in benchmarks_to_run:
+        if not path.exists():
+            print(f"\n  [WARN] Benchmark trace not found at {path}, skipping.")
+            continue
+        bench_df = pd.read_csv(path, parse_dates=["timestamp"])
+        if bench_df["cpu_util"].max() > 1.5:
+            bench_df["cpu_util"] = bench_df["cpu_util"] / 100.0
+        bench_df["cpu_util"] = bench_df["cpu_util"].clip(0.0, 1.0).astype(np.float32)
+        print(f"\n{'=' * 65}")
+        print(f"  Benchmark Evaluation: {label} ({len(bench_df):,} timesteps)")
+        print(f"{'=' * 65}")
+        _eval_and_report(bench_df, label, plot_file)
 
     print("", flush=True)
     print("=" * 65, flush=True)
     print("  Evaluation complete.", flush=True)
-    print(f"  Plot saved : {output_path.resolve()}", flush=True)
     print("=" * 65, flush=True)
 
 

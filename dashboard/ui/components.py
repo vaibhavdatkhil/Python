@@ -133,11 +133,14 @@ def render_header(api_status: str = "unknown", theme: str = "dark") -> None:
         f"""
         <div class="hero-banner">
           <div class="hero-left">
-            <div class="hero-title">🚀 K8s RL Autoscaling Dashboard</div>
-            <div class="hero-sub">
-              Intelligent Kubernetes pod autoscaling using
-              <strong>LSTM MC-Dropout forecasting</strong> and
-              <strong>PPO reinforcement learning</strong>.
+            <span class="hero-icon">🚀</span>
+            <div class="hero-text">
+              <div class="hero-title">K8s RL Autoscaling Dashboard</div>
+              <div class="hero-sub">
+                Intelligent Kubernetes pod autoscaling using
+                <strong>LSTM MC-Dropout forecasting</strong> and
+                <strong>PPO reinforcement learning</strong>.
+              </div>
             </div>
           </div>
           <div class="hero-right">
@@ -176,7 +179,7 @@ def render_section_header(title: str, subtitle: str = "") -> None:
           <p class="section-title">{title}</p>
           {sub_html}
         </div>
-        <hr class="section-divider" />
+        <div class="section-divider"></div>
         """,
         unsafe_allow_html=True,
     )

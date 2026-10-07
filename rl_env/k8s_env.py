@@ -144,7 +144,7 @@ class K8sAutoscalingEnv(gym.Env):
 
         # Clear scaling queue; pre-fill with no-op deltas
         self._pending_deltas = collections.deque(
-            [0] * self._lag, maxlen=self._lag
+            [0] * self._lag, maxlen=self._lag + 1
         )
         self._last_action_delta = 0
 

@@ -23,6 +23,7 @@ matplotlib.use("Agg")   # headless backend — no display required
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import numpy as np
+import pandas as pd
 import yaml
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 import torch
@@ -134,16 +135,86 @@ def plot_forecast(
 
 # ── main evaluation function ──────────────────────────────────────────────────
 
-def evaluate(cfg: dict, verbose: bool = True) -> dict:
-    """Run full evaluation on the test split.
+def evaluate_windows(
+    model,
+    scaler,
+    X: np.ndarray,
+    y: np.ndarray,
+    cfg: dict,
+    device: torch.device,
+    label: str,
+    output_plot: Path,
+    max_samples: int | None = None,
+    verbose: bool = True,
+) -> dict:
+    """Run MC Dropout evaluation on a set of (X, y) windows and save plot."""
+    if max_samples is not None and len(X) > max_samples:
+        X = X[:max_samples]
+        y = y[:max_samples]
+
+    inf_cfg   = cfg["inference"]
+    n_samples = inf_cfg["n_mc_samples"]
+    lo_pct    = inf_cfg["ci_lower_pct"]
+    hi_pct    = inf_cfg["ci_upper_pct"]
+
+    forecasts_list, lowers_list, uppers_list = [], [], []
+
+    if verbose:
+        print(f"\nRunning MC inference on {label} ({len(X)} windows, {n_samples} samples per window) …")
+
+    for i, x_win in enumerate(X):
+        mean, lower, upper = mc_predict(
+            model, x_win,
+            n_samples=n_samples, scaler=scaler,
+            lower_pct=lo_pct, upper_pct=hi_pct,
+            device=device,
+        )
+        forecasts_list.append(mean)
+        lowers_list.append(lower)
+        uppers_list.append(upper)
+
+        if verbose and (i + 1) % 500 == 0:
+            print(f"  … {i+1}/{len(X)}")
+
+    forecasts = np.array(forecasts_list)
+    lowers    = np.array(lowers_list)
+    uppers    = np.array(uppers_list)
+
+    # Inverse-transform actuals for fair comparison
+    actuals = scaler.inverse_transform(y.reshape(-1, 1)).reshape(y.shape)
+    metrics = compute_metrics(actuals, forecasts, lowers, uppers)
+
+    if verbose:
+        print(f"\n-- Results: {label} ----------------------------------")
+        print(f"  MAE              : {metrics['mae']:.5f}")
+        print(f"  RMSE             : {metrics['rmse']:.5f}")
+        print(f"  Interval coverage: {metrics['coverage']*100:.1f}%  (nominal: {hi_pct - lo_pct}%)")
+        print("--------------------------------------------------------")
+
+    output_plot.parent.mkdir(parents=True, exist_ok=True)
+    plot_forecast(actuals, forecasts, lowers, uppers, metrics, output_plot)
+
+    return {**metrics, "forecasts": forecasts, "actuals": actuals,
+            "lowers": lowers, "uppers": uppers}
+
+
+def evaluate(
+    cfg: dict,
+    benchmark: str = "none",
+    eval_trace: str | None = None,
+    max_samples: int | None = None,
+    verbose: bool = True,
+) -> dict:
+    """Run evaluation on the test split and optional benchmark traces.
 
     Returns
     -------
-    dict with keys: mae, rmse, coverage, and raw arrays.
+    dict with metrics for the primary test split.
     """
     project_root = Path(__file__).parent.parent
     ckpt_path    = project_root / cfg["training"]["checkpoint_dir"] / "best_model.pt"
     output_dir   = project_root / cfg["evaluation"]["output_dir"]
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     if not ckpt_path.exists():
         raise FileNotFoundError(
@@ -166,58 +237,66 @@ def evaluate(cfg: dict, verbose: bool = True) -> dict:
     splits, _ = pipeline.fit_transform(df)
     X_tr, y_tr, X_val, y_val, X_te, y_te = splits
 
-    if verbose:
-        print(f"  Test samples : {len(X_te)}")
+    primary_res = evaluate_windows(
+        model, scaler, X_te, y_te, cfg, device,
+        label="Held-out Test Split",
+        output_plot=output_dir / "evaluation_plot.png",
+        max_samples=max_samples,
+        verbose=verbose,
+    )
 
-    # MC inference on all test windows
-    inf_cfg   = cfg["inference"]
-    n_samples = inf_cfg["n_mc_samples"]
-    lo_pct    = inf_cfg["ci_lower_pct"]
-    hi_pct    = inf_cfg["ci_upper_pct"]
+    # Benchmark evaluations if requested
+    benchmarks_to_run = []
+    if eval_trace:
+        benchmarks_to_run.append(("Custom Trace", Path(eval_trace), "eval_custom.png"))
+    if benchmark in ("azure", "all"):
+        benchmarks_to_run.append(("Azure VM Trace", project_root / "data" / "azure_vm_workload_trace.csv", "eval_azure.png"))
+    if benchmark in ("alibaba", "all"):
+        benchmarks_to_run.append(("Alibaba Cluster Trace", project_root / "data" / "alibaba_cluster_trace.csv", "eval_alibaba.png"))
 
-    forecasts_list, lowers_list, uppers_list = [], [], []
+    from preprocessing.pipeline import make_windows
+    W = cfg["preprocessing"]["window_size"]
+    H = cfg["preprocessing"]["horizon"]
 
-    if verbose:
-        print(f"Running MC inference ({n_samples} samples per window) …")
+    all_results = {"test_split": primary_res}
 
-    for i, x_win in enumerate(X_te):
-        mean, lower, upper = mc_predict(
-            model, x_win,
-            n_samples=n_samples, scaler=scaler,
-            lower_pct=lo_pct, upper_pct=hi_pct,
-            device=device,
+    for label, path, plot_file in benchmarks_to_run:
+        if not path.exists():
+            print(f"\n[WARN] Benchmark trace {path} not found, skipping.")
+            continue
+        bench_df = pd.read_csv(path, parse_dates=["timestamp"])
+        if bench_df["cpu_util"].max() > 1.5:
+            bench_df["cpu_util"] = bench_df["cpu_util"] / 100.0
+        bench_df["cpu_util"] = bench_df["cpu_util"].clip(0.0, 1.0).astype(np.float32)
+
+        # Scale with model's fitted scaler
+        raw_vals = bench_df["cpu_util"].values.reshape(-1, 1)
+        scaled_bench = scaler.transform(raw_vals).ravel().astype(np.float32)
+        X_bench, y_bench = make_windows(scaled_bench, window=W, horizon=H)
+
+        b_res = evaluate_windows(
+            model, scaler, X_bench, y_bench, cfg, device,
+            label=label,
+            output_plot=output_dir / plot_file,
+            max_samples=max_samples or 1000,
+            verbose=verbose,
         )
-        forecasts_list.append(mean)
-        lowers_list.append(lower)
-        uppers_list.append(upper)
+        all_results[label] = b_res
 
-        if verbose and (i + 1) % 500 == 0:
-            print(f"  … {i+1}/{len(X_te)}")
+    if len(benchmarks_to_run) > 0 and verbose:
+        print("\n" + "=" * 65)
+        print("  Summary Benchmark Comparison")
+        print("=" * 65)
+        print(f"  {'Dataset':<28} {'MAE':>10} {'RMSE':>10} {'Coverage':>10}")
+        print(f"  {'-'*62}")
+        print(f"  {'Held-out Test Split':<28} {primary_res['mae']:>10.4f} {primary_res['rmse']:>10.4f} {primary_res['coverage']*100:>9.1f}%")
+        for label, path, _ in benchmarks_to_run:
+            if label in all_results:
+                r = all_results[label]
+                print(f"  {label:<28} {r['mae']:>10.4f} {r['rmse']:>10.4f} {r['coverage']*100:>9.1f}%")
+        print("=" * 65)
 
-    forecasts = np.array(forecasts_list)   # (N_test, horizon)
-    lowers    = np.array(lowers_list)
-    uppers    = np.array(uppers_list)
-
-    # Inverse-transform actuals for fair comparison
-    actuals = scaler.inverse_transform(y_te.reshape(-1, 1)).reshape(y_te.shape)
-
-    # Metrics
-    metrics = compute_metrics(actuals, forecasts, lowers, uppers)
-
-    if verbose:
-        print("\n-- Evaluation Results ----------------------------------")
-        print(f"  MAE              : {metrics['mae']:.5f}")
-        print(f"  RMSE             : {metrics['rmse']:.5f}")
-        print(f"  Interval coverage: {metrics['coverage']*100:.1f}%  "
-              f"(nominal: {hi_pct - lo_pct}%)")
-        print("--------------------------------------------------------")
-
-    # Plot
-    plot_path = output_dir / "evaluation_plot.png"
-    plot_forecast(actuals, forecasts, lowers, uppers, metrics, plot_path)
-
-    return {**metrics, "forecasts": forecasts, "actuals": actuals,
-            "lowers": lowers, "uppers": uppers}
+    return primary_res
 
 
 # ── CLI entry-point ───────────────────────────────────────────────────────────
@@ -225,6 +304,18 @@ def evaluate(cfg: dict, verbose: bool = True) -> dict:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate the LSTM forecaster.")
     parser.add_argument("--config", default="config.yaml")
+    parser.add_argument(
+        "--benchmark", choices=["none", "azure", "alibaba", "all"], default="none",
+        help="Evaluate on real cloud benchmark traces (azure, alibaba, all).",
+    )
+    parser.add_argument(
+        "--eval-trace", default=None,
+        help="Path to custom CSV trace for evaluation.",
+    )
+    parser.add_argument(
+        "--max-samples", type=int, default=None,
+        help="Maximum windows to evaluate (useful for faster benchmark inference).",
+    )
     args = parser.parse_args()
 
     project_root = Path(__file__).parent.parent
@@ -233,4 +324,10 @@ if __name__ == "__main__":
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
 
-    evaluate(cfg, verbose=True)
+    evaluate(
+        cfg,
+        benchmark=args.benchmark,
+        eval_trace=args.eval_trace,
+        max_samples=args.max_samples,
+        verbose=True,
+    )

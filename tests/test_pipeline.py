@@ -167,5 +167,69 @@ class TestAPISchemas(unittest.TestCase):
         self.assertEqual(req.replicas_norm, 0.3)
 
 
+class TestFixesVerification(unittest.TestCase):
+    def test_env_scaling_lag_queue(self):
+        """Fix 1: verify maxlen=lag + 1 buffers deltas properly for exact lag steps."""
+        import copy
+        with open(PROJECT_ROOT / "config.yaml") as f:
+            cfg = yaml.safe_load(f)
+        cfg_lag = copy.deepcopy(cfg)
+        cfg_lag["rl_env"]["scale_lag_steps"] = 2
+        cfg_lag["rl_env"]["initial_replicas"] = 3
+
+        df = load_trace(cfg=cfg)
+        env = K8sAutoscalingEnv(cfg_lag, model=None, scaler=None, trace_df=df)
+        env.reset(seed=42)
+
+        # Action 4 is DELTA=+2 (ACTION_TO_DELTA[4] == +2)
+        # Action 2 is DELTA=0  (ACTION_TO_DELTA[2] == 0)
+
+        # Step 1: delta +2 queued, effective delta applied is 0 (from initial fill)
+        _, _, _, _, info1 = env.step(4)
+        self.assertEqual(info1["replicas"], 3)
+
+        # Step 2: delta 0 queued, effective delta applied is still 0
+        _, _, _, _, info2 = env.step(2)
+        self.assertEqual(info2["replicas"], 3)
+
+        # Step 3: effective delta applied should now be +2 (lag=2 elapsed)
+        _, _, _, _, info3 = env.step(2)
+        self.assertEqual(info3["replicas"], 5)
+
+    def test_azure_benchmark_trace_monday_and_weekends(self):
+        """Fix 2: verify Azure trace starts on Monday and weekends are computed correctly."""
+        from data.benchmark_traces import generate_azure_trace
+        df_azure = generate_azure_trace(n_days=7, seed=42)
+        first_ts = df_azure["timestamp"].iloc[0]
+        self.assertEqual(first_ts.day_name(), "Monday")
+
+        weekends = df_azure[df_azure["timestamp"].dt.dayofweek >= 5]
+        weekdays = df_azure[df_azure["timestamp"].dt.dayofweek < 5]
+        self.assertGreater(len(weekends), 0)
+        self.assertGreater(len(weekdays), 0)
+        # Weekday load should exceed weekend load due to weekly_factor
+        self.assertGreater(weekdays["cpu_util"].mean(), weekends["cpu_util"].mean())
+
+    def test_locust_task_includes_work_endpoint(self):
+        """Fix 3: verify Locust user has a task hitting the /work endpoint."""
+        locust_path = PROJECT_ROOT / "locust" / "locustfile.py"
+        self.assertTrue(locust_path.exists())
+        content = locust_path.read_text(encoding="utf-8")
+        self.assertIn('"/work"', content)
+        self.assertIn("compute_work", content)
+
+    def test_benchmark_files_and_alibaba_evaluation(self):
+        """Fix 4: verify Azure and Alibaba trace CSVs exist and can be loaded for evaluation."""
+        import pandas as pd
+        azure_path = PROJECT_ROOT / "data" / "azure_vm_workload_trace.csv"
+        alibaba_path = PROJECT_ROOT / "data" / "alibaba_cluster_trace.csv"
+        self.assertTrue(azure_path.exists())
+        self.assertTrue(alibaba_path.exists())
+
+        df_ali = pd.read_csv(alibaba_path, parse_dates=["timestamp"])
+        self.assertIn("cpu_util", df_ali.columns)
+        self.assertGreater(len(df_ali), 1000)
+
+
 if __name__ == "__main__":
     unittest.main()
